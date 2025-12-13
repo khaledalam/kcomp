@@ -26,8 +26,19 @@ ratio() {
   awk -v a="$1" -v b="$2" 'BEGIN { if (a==0) { printf "0.00" } else { printf "%.2f", (b*100.0/a) } }'
 }
 
-run_time() {
-  /usr/bin/time -p bash -c "$1" 1>/dev/null 2>&1 | awk '/^real /{print $2}'
+sum_time() {
+  awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", (a+0.0)+(b+0.0) }'
+}
+
+run_timed() {
+  local cmd="$1"
+  local tf
+  tf=$(mktemp)
+
+  /usr/bin/time -p bash -c "$cmd" 2>"$tf"
+
+  awk '/^real /{print $2; exit}' "$tf"
+  rm -f "$tf"
 }
 
 verify() {
@@ -39,22 +50,23 @@ verify() {
 }
 
 print_header() {
-  printf "${bold}%-14s %12s  %8s  %10s  %10s  %s${reset}\n" \
-    "algorithm" "compressed" "ratio" "encode" "decode" "verify"
+  printf "${bold}%-14s %12s  %8s  %10s  %10s  %10s  %s${reset}\n" \
+    "algorithm" "compressed" "ratio" "encode" "decode" "wall" "verify"
 }
 
 print_row() {
-  local name="$1" in_sz="$2" out_file="$3" enc_s="$4" dec_s="$5" ok="$6"
+  local name="$1" in_sz="$2" out_file="$3" enc_s="$4" dec_s="$5" wall_s="$6" ok="$7"
   local out_sz rat
   out_sz=$(bytes "$out_file" 2>/dev/null || echo "0")
   rat=$(ratio "$in_sz" "$out_sz")
 
-  printf "%-14s %12s  %8s  %10s  %10s  %s\n" \
+  printf "%-14s %12s  %8s  %10s  %10s  %10s  %s\n" \
     "$name" \
     "${out_sz}B" \
     "${rat}%" \
     "${enc_s}s" \
     "${dec_s}s" \
+    "${wall_s}s" \
     "$ok"
 }
 
@@ -79,37 +91,42 @@ bench_dataset() {
 
   rm -f outputs/out.* outputs/restored.* 2>/dev/null || true
 
-  enc=$(run_time "\"$bin\" c \"$input\" outputs/out.kcomp")
-  dec=$(run_time "\"$bin\" d outputs/out.kcomp outputs/restored.kcomp")
+  enc=$(run_timed "\"$bin\" c \"$input\" outputs/out.kcomp")
+  dec=$(run_timed "\"$bin\" d outputs/out.kcomp outputs/restored.kcomp")
+  wall=$(sum_time "$enc" "$dec")
   ok=$(verify "$input" outputs/restored.kcomp)
-  print_row "kcomp (PPM2)" "$in_sz" outputs/out.kcomp "$enc" "$dec" "$ok"
+  print_row "kcomp (PPM2)" "$in_sz" outputs/out.kcomp "$enc" "$dec" "$wall" "$ok"
 
   if need gzip; then
-    enc=$(run_time "gzip -c -9 \"$input\" > outputs/out.gz")
-    dec=$(run_time "gzip -cd outputs/out.gz > outputs/restored.gz")
+    enc=$(run_timed "gzip -c -9 \"$input\" > outputs/out.gz")
+    dec=$(run_timed "gzip -cd outputs/out.gz > outputs/restored.gz")
+    wall=$(sum_time "$enc" "$dec")
     ok=$(verify "$input" outputs/restored.gz)
-    print_row "gzip -9" "$in_sz" outputs/out.gz "$enc" "$dec" "$ok"
+    print_row "gzip -9" "$in_sz" outputs/out.gz "$enc" "$dec" "$wall" "$ok"
   fi
 
   if need brotli; then
-    enc=$(run_time "brotli -q 11 -c \"$input\" > outputs/out.br")
-    dec=$(run_time "brotli -d -c outputs/out.br > outputs/restored.br")
+    enc=$(run_timed "brotli -q 11 -c \"$input\" > outputs/out.br")
+    dec=$(run_timed "brotli -d -c outputs/out.br > outputs/restored.br")
+    wall=$(sum_time "$enc" "$dec")
     ok=$(verify "$input" outputs/restored.br)
-    print_row "brotli -11" "$in_sz" outputs/out.br "$enc" "$dec" "$ok"
+    print_row "brotli -11" "$in_sz" outputs/out.br "$enc" "$dec" "$wall" "$ok"
   fi
 
   if need zstd; then
-    enc=$(run_time "zstd -19 -c \"$input\" > outputs/out.zst")
-    dec=$(run_time "zstd -d -c outputs/out.zst > outputs/restored.zst")
+    enc=$(run_timed "zstd -19 -c \"$input\" > outputs/out.zst")
+    dec=$(run_timed "zstd -d -c outputs/out.zst > outputs/restored.zst")
+    wall=$(sum_time "$enc" "$dec")
     ok=$(verify "$input" outputs/restored.zst)
-    print_row "zstd -19" "$in_sz" outputs/out.zst "$enc" "$dec" "$ok"
+    print_row "zstd -19" "$in_sz" outputs/out.zst "$enc" "$dec" "$wall" "$ok"
   fi
 
   if need xz; then
-    enc=$(run_time "xz -9e -c \"$input\" > outputs/out.xz")
-    dec=$(run_time "xz -d -c outputs/out.xz > outputs/restored.xz")
+    enc=$(run_timed "xz -9e -c \"$input\" > outputs/out.xz")
+    dec=$(run_timed "xz -d -c outputs/out.xz > outputs/restored.xz")
+    wall=$(sum_time "$enc" "$dec")
     ok=$(verify "$input" outputs/restored.xz)
-    print_row "xz -9e" "$in_sz" outputs/out.xz "$enc" "$dec" "$ok"
+    print_row "xz -9e" "$in_sz" outputs/out.xz "$enc" "$dec" "$wall" "$ok"
   fi
 
   hr

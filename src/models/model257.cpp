@@ -21,7 +21,7 @@ void Model257::InitEscOnly() {
   cnt.fill(0);
   cnt[256] = 1;
   total = 1;
-  cum_valid = false;
+  FenwickBuild();
 }
 
 void Model257::InitUniform256() {
@@ -30,7 +30,7 @@ void Model257::InitUniform256() {
     cnt[i] = 1;
   cnt[256] = 1;
   total = 257;
-  cum_valid = false;
+  FenwickBuild();
 }
 
 uint16_t Model257::Get(int sym) const { return cnt[sym]; }
@@ -38,39 +38,65 @@ uint16_t Model257::Get(int sym) const { return cnt[sym]; }
 void Model257::Bump(int sym) {
   cnt[sym] += 1;
   total += 1;
-  cum_valid = false;
-  if (total >= 1u << 15) {
-    Rescale(cnt, total);
-    cum_valid = false;
-  }
-}
+  FenwickAdd(sym, 1);
 
-void Model257::UpdateCum() {
-  if (cum_valid)
-    return;
-  uint32_t c = 0;
-  for (int i = 0; i < 257; ++i) {
-    cum[i] = c;
-    c += cnt[i];
+  if (total >= (1u << 15)) {
+    Rescale(cnt, total);
+    FenwickBuild();
   }
-  cum_valid = true;
 }
 
 void Model257::Cum(int sym, uint32_t &lo, uint32_t &hi) {
-  UpdateCum();
-  lo = cum[sym];
-  hi = cum[sym] + cnt[sym];
+  const uint32_t pref = FenwickPrefix(sym);
+  hi = pref;
+  if (sym <= 0)
+    lo = 0;
+  else
+    lo = FenwickPrefix(sym - 1);
 }
 
 int Model257::FindByFreq(uint32_t f) {
-  UpdateCum();
-  int lo = 0, hi = 256;
-  while (lo < hi) {
-    int mid = (lo + hi + 1) >> 1;
-    if (cum[mid] <= f)
-      lo = mid;
-    else
-      hi = mid - 1;
+  int idx = 0;
+  uint32_t bitmask = 1;
+  while ((bitmask << 1) <= 257)
+    bitmask <<= 1;
+
+  while (bitmask) {
+    int next = idx + (int)bitmask;
+    if (next <= 257 && bit[next] <= f) {
+      idx = next;
+      f -= bit[next];
+    }
+    bitmask >>= 1;
   }
-  return lo;
+
+  if (idx > 256)
+    return 256;
+  return idx;
+}
+
+void Model257::FenwickBuild() {
+  bit.fill(0);
+  for (int sym = 0; sym < 257; ++sym)
+    FenwickAdd(sym, cnt[sym]);
+}
+
+void Model257::FenwickAdd(int sym, uint32_t delta) {
+  int i = sym + 1;
+  while (i <= 257) {
+    bit[i] += delta;
+    i += i & -i;
+  }
+}
+
+uint32_t Model257::FenwickPrefix(int sym) const {
+  if (sym < 0)
+    return 0;
+  uint32_t s = 0;
+  int i = sym + 1;
+  while (i > 0) {
+    s += bit[i];
+    i -= i & -i;
+  }
+  return s;
 }

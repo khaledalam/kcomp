@@ -188,7 +188,7 @@ This multi-order approach balances compression ratio with robustness on diverse 
 ## Project Structure
 
 ```text
-khabit/
+kcomp/
 ├── src/
 │   ├── main.cpp          Entry point
 │   ├── core/

@@ -25,3 +25,6 @@ cmake-build-*/
 CMakeCache.txt
 CMakeFiles/
 Makefile.bak
+
+.lh
+.history
