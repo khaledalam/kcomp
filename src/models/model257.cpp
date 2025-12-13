@@ -21,6 +21,7 @@ void Model257::InitEscOnly() {
   cnt.fill(0);
   cnt[256] = 1;
   total = 1;
+  cum_valid = false;
 }
 
 void Model257::InitUniform256() {
@@ -29,6 +30,7 @@ void Model257::InitUniform256() {
     cnt[i] = 1;
   cnt[256] = 1;
   total = 257;
+  cum_valid = false;
 }
 
 uint16_t Model257::Get(int sym) const { return cnt[sym]; }
@@ -36,25 +38,39 @@ uint16_t Model257::Get(int sym) const { return cnt[sym]; }
 void Model257::Bump(int sym) {
   cnt[sym] += 1;
   total += 1;
-  if (total >= 1u << 15)
+  cum_valid = false;
+  if (total >= 1u << 15) {
     Rescale(cnt, total);
+    cum_valid = false;
+  }
 }
 
-void Model257::Cum(int sym, uint32_t &lo, uint32_t &hi) const {
-  uint32_t c = 0;
-  for (int i = 0; i < sym; ++i)
-    c += cnt[i];
-  lo = c;
-  hi = c + cnt[sym];
-}
-
-int Model257::FindByFreq(uint32_t f) const {
+void Model257::UpdateCum() {
+  if (cum_valid)
+    return;
   uint32_t c = 0;
   for (int i = 0; i < 257; ++i) {
-    uint32_t n = c + cnt[i];
-    if (f < n)
-      return i;
-    c = n;
+    cum[i] = c;
+    c += cnt[i];
   }
-  return 256;
+  cum_valid = true;
+}
+
+void Model257::Cum(int sym, uint32_t &lo, uint32_t &hi) {
+  UpdateCum();
+  lo = cum[sym];
+  hi = cum[sym] + cnt[sym];
+}
+
+int Model257::FindByFreq(uint32_t f) {
+  UpdateCum();
+  int lo = 0, hi = 256;
+  while (lo < hi) {
+    int mid = (lo + hi + 1) >> 1;
+    if (cum[mid] <= f)
+      lo = mid;
+    else
+      hi = mid - 1;
+  }
+  return lo;
 }

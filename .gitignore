@@ -1,6 +1,8 @@
 build/
 outputs/
 test_data/
+enwik*
+*.zip
 
 *.o
 *.a
