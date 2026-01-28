@@ -4,40 +4,18 @@
 
 namespace {
 
-void ClassifySuffixes(const std::vector<uint8_t>& text, std::vector<bool>& types) {
-  size_t n = text.size();
-  types.resize(n + 1);
-  types[n] = true;
-
-  if (n == 0) return;
-  types[n - 1] = false;
-
-  for (size_t i = n - 1; i > 0; i--) {
-    if (text[i - 1] < text[i]) {
-      types[i - 1] = true;
-    } else if (text[i - 1] > text[i]) {
-      types[i - 1] = false;
-    } else {
-      types[i - 1] = types[i];
-    }
-  }
-}
-
-inline bool IsLMS(const std::vector<bool>& types, size_t i) {
-  return i > 0 && types[i] && !types[i - 1];
-}
-
 void BuildSuffixArraySimple(const std::vector<uint8_t>& text, std::vector<int>& sa) {
   size_t n = text.size();
   sa.resize(n);
   std::iota(sa.begin(), sa.end(), 0);
 
   std::sort(sa.begin(), sa.end(), [&](int a, int b) {
-    while (a < (int)n && b < (int)n) {
-      if (text[a] != text[b]) return text[a] < text[b];
-      a++; b++;
+    for (size_t i = 0; i < n; i++) {
+      size_t idx_a = (a + i) % n;
+      size_t idx_b = (b + i) % n;
+      if (text[idx_a] != text[idx_b]) return text[idx_a] < text[idx_b];
     }
-    return a > b;
+    return a < b;
   });
 }
 

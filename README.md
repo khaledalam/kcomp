@@ -14,8 +14,8 @@ kcomp implements an ensemble of compression algorithms including PPM (Prediction
 
 ```text
                         WINS
-  kcomp    ████████████████████████████████  13  (81%)
-  brotli   █████                              2  (13%)
+  kcomp    ███████████████████████████       11  (69%)
+  brotli   ███████                            3  (19%)
   xz       ██                                 1  (6%)
   zstd     ██                                 1  (6%)
   gzip     ░                                  0  (0%)
@@ -71,17 +71,24 @@ Log File (42 KB)
 ```text
 BMP Image (3 KB)
   kcomp   ███                          13.1%  ★ BEST
-  gzip    ██████████████████           73.6%
-  brotli  ██████████████████           72.3%
+  gzip    ██████████████████           73.7%
+  brotli  ██████████████████           72.4%
   xz      ██████████████████████       88.9%
   zstd    ██████████████████           72.2%
 
+PNG Image (309 B)
+  kcomp   ████████████████████         79.3%  ★ BEST
+  gzip    ███████████████████████████ 108.4%
+  brotli  ████████████████████████     94.5%
+  xz      ██████████████████████████  106.1%
+  zstd    ██████████████████████████  104.5%
+
 WAV Audio (8 KB)
   kcomp   █                             5.0%  ★ BEST
-  gzip    ██                            6.9%
-  brotli  █                             5.7%
-  xz      ██                            6.4%
-  zstd    █                             5.7%
+  gzip    ██                            7.0%
+  brotli  █                             5.8%
+  xz      ██                            6.5%
+  zstd    █                             5.8%
 
 PDF Document (454 B)
   kcomp   █████████████                51.5%  ★ BEST
@@ -113,11 +120,18 @@ C++ Source (47 KB)
 
 ```text
 Repeated Pattern (70 KB)
-  kcomp   ░                            0.03%  ★ BEST
+  kcomp   ░                            0.05%
   gzip    ░                             0.3%
-  brotli  ░                            0.04%
+  brotli  ░                            0.04%  ★ BEST
   xz      ░                             0.2%
   zstd    ░                            0.06%
+
+Random Binary (10 KB)
+  kcomp   █████████████████████████  100.0%  ★ BEST
+  gzip    █████████████████████████  100.4%
+  brotli  █████████████████████████  100.1%
+  xz      █████████████████████████  100.7%
+  zstd    █████████████████████████  100.1%
 ```
 
 ---
@@ -126,40 +140,65 @@ Repeated Pattern (70 KB)
 
 ```text
                               kcomp     gzip      Δ
-JSON Data                      2.0%     8.0%    4.0x better
-BMP Image                     13.1%    73.6%    5.6x better
+BMP Image                     13.1%    73.7%    5.6x better
+JSON Data                      2.0%     8.1%    4.0x better
 XML Data                       2.8%    10.3%    3.7x better
-Repeated Pattern              0.03%     0.3%   10.0x better
-ELF Binary                     0.4%     0.8%    2.0x better
+CSV Data                       5.3%    17.1%    3.2x better
+English Dictionary            12.8%    31.6%    2.5x better
+PNG Image                     79.3%   108.4%    1.4x better
+WAV Audio                      5.0%     7.0%    1.4x better
+ELF Binary                     0.4%     0.9%    2.0x better
 ```
 
 ## Installation
 
+### macOS / Linux
+
 ```bash
 git clone https://github.com/khaledalam/kcomp
 cd kcomp
-cmake -B build && cmake --build build
+make install
 ```
 
-Or using make:
+This installs `kcomp` to `/usr/local/bin`. You can then use it from anywhere:
+
+```bash
+kcomp c file.txt file.kc    # Compress
+kcomp d file.kc file.txt    # Decompress
+```
+
+To uninstall:
+
+```bash
+make uninstall
+```
+
+### Build Only (without installing)
 
 ```bash
 make build
+./build/kcomp c input.txt output.kc
+```
+
+### Custom Install Location
+
+```bash
+make install PREFIX=/opt/kcomp
 ```
 
 ## Usage
 
 ```bash
-# Compress
-./build/kcomp c input.txt output.kc
+# Compress a file
+kcomp c input.txt output.kc
 
-# Decompress
-./build/kcomp d output.kc restored.txt
+# Decompress a file
+kcomp d output.kc restored.txt
 
-# Benchmark single file
-./build/kcomp b testfile.txt
+# Benchmark compression on a file
+kcomp b testfile.txt
 
-# Run comprehensive benchmark
+# Run full benchmark suite
 ./benchmark_all.sh
 ```
 

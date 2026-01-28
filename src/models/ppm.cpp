@@ -1662,41 +1662,32 @@ std::vector<uint8_t> CompressHybrid(const std::vector<uint8_t> &in) {
     TryCompress(best, best_mode, CompressPPM6(lzopt_data), 7);
   }
 
-  // Try BWT+MTF preprocessing - only for smaller files (BWT sort is O(n log n))
   if (in.size() <= MAX_BWT_SIZE) {
     uint32_t bwt_idx = 0;
     auto bwt_data = BWTEncode(in, bwt_idx);
     auto mtf_data = MTFEncode(bwt_data);
-    bwt_data.clear(); // Free memory
-
-    // Prefix with BWT index
+    bwt_data.clear();
     std::vector<uint8_t> prefix = {
       (uint8_t)((bwt_idx >> 24) & 0xFF),
       (uint8_t)((bwt_idx >> 16) & 0xFF),
       (uint8_t)((bwt_idx >> 8) & 0xFF),
       (uint8_t)(bwt_idx & 0xFF)
     };
-
-    auto bwt_ppm3 = CompressPPM3(mtf_data);
-    std::vector<uint8_t> full3;
-    full3.reserve(4 + bwt_ppm3.size());
+    auto ppm3 = CompressPPM3(mtf_data);
+    auto ppm5 = CompressPPM5(mtf_data);
+    auto ppm6 = CompressPPM6(mtf_data);
+    std::vector<uint8_t> full3, full5, full6;
+    full3.reserve(4 + ppm3.size());
     full3.insert(full3.end(), prefix.begin(), prefix.end());
-    full3.insert(full3.end(), bwt_ppm3.begin(), bwt_ppm3.end());
-    bwt_ppm3.clear();
-    TryCompress(best, best_mode, std::move(full3), 8);
-
-    auto bwt_ppm5 = CompressPPM5(mtf_data);
-    std::vector<uint8_t> full5;
-    full5.reserve(4 + bwt_ppm5.size());
+    full3.insert(full3.end(), ppm3.begin(), ppm3.end());
+    full5.reserve(4 + ppm5.size());
     full5.insert(full5.end(), prefix.begin(), prefix.end());
-    full5.insert(full5.end(), bwt_ppm5.begin(), bwt_ppm5.end());
-    TryCompress(best, best_mode, std::move(full5), 9);
-
-    auto bwt_ppm6 = CompressPPM6(mtf_data);
-    std::vector<uint8_t> full6;
-    full6.reserve(4 + bwt_ppm6.size());
+    full5.insert(full5.end(), ppm5.begin(), ppm5.end());
+    full6.reserve(4 + ppm6.size());
     full6.insert(full6.end(), prefix.begin(), prefix.end());
-    full6.insert(full6.end(), bwt_ppm6.begin(), bwt_ppm6.end());
+    full6.insert(full6.end(), ppm6.begin(), ppm6.end());
+    TryCompress(best, best_mode, std::move(full3), 8);
+    TryCompress(best, best_mode, std::move(full5), 9);
     TryCompress(best, best_mode, std::move(full6), 13);
   }
 
@@ -1719,21 +1710,18 @@ std::vector<uint8_t> CompressHybrid(const std::vector<uint8_t> &in) {
     TryCompress(best, best_mode, CompressPPM6(rle_data), 15);
   }
 
-  // Try LZ77+BWT+MTF - combines long-range matching with local grouping
   if (in.size() <= MAX_BWT_SIZE) {
     auto lz_data = LZ77Compress(in);
     uint32_t bwt_idx = 0;
     auto bwt_data = BWTEncode(lz_data, bwt_idx);
     auto mtf_data = MTFEncode(bwt_data);
     bwt_data.clear();
-
     std::vector<uint8_t> prefix = {
       (uint8_t)((bwt_idx >> 24) & 0xFF),
       (uint8_t)((bwt_idx >> 16) & 0xFF),
       (uint8_t)((bwt_idx >> 8) & 0xFF),
       (uint8_t)(bwt_idx & 0xFF)
     };
-
     auto ppm5 = CompressPPM5(mtf_data);
     std::vector<uint8_t> full;
     full.reserve(4 + ppm5.size());
@@ -1752,13 +1740,13 @@ std::vector<uint8_t> CompressHybrid(const std::vector<uint8_t> &in) {
     TryCompress(best, best_mode, CompressPPM5(delta_rle), 18);
   }
 
-  // Try Pattern encoding - for files with a single repeating pattern
-  {
-    auto pattern_data = PatternEncode(in);
-    if (!pattern_data.empty()) {
-      TryCompress(best, best_mode, std::move(pattern_data), 19);
-    }
-  }
+  // Pattern encoding disabled - decompression bug
+  // {
+  //   auto pattern_data = PatternEncode(in);
+  //   if (!pattern_data.empty()) {
+  //     TryCompress(best, best_mode, std::move(pattern_data), 19);
+  //   }
+  // }
 
   // Try Word tokenization - good for HTML/text with common patterns
   {
@@ -1789,21 +1777,18 @@ std::vector<uint8_t> CompressHybrid(const std::vector<uint8_t> &in) {
     }
   }
 
-  // Try Delta+BWT for binary files with structure
   if (in.size() <= MAX_BWT_SIZE) {
     auto delta_data = DeltaEncode(in);
     uint32_t bwt_idx = 0;
     auto bwt_data = BWTEncode(delta_data, bwt_idx);
     auto mtf_data = MTFEncode(bwt_data);
     bwt_data.clear();
-
     std::vector<uint8_t> prefix = {
       (uint8_t)((bwt_idx >> 24) & 0xFF),
       (uint8_t)((bwt_idx >> 16) & 0xFF),
       (uint8_t)((bwt_idx >> 8) & 0xFF),
       (uint8_t)(bwt_idx & 0xFF)
     };
-
     auto ppm5 = CompressPPM5(mtf_data);
     std::vector<uint8_t> full;
     full.reserve(4 + ppm5.size());
@@ -1826,21 +1811,18 @@ std::vector<uint8_t> CompressHybrid(const std::vector<uint8_t> &in) {
     TryCompress(best, best_mode, CompressPPM5(rle_data), 24);
   }
 
-  // Try RLE+BWT+MTF - RLE removes runs, BWT groups similar contexts
   if (in.size() <= MAX_BWT_SIZE) {
     auto rle_data = RLECompress(in);
     uint32_t bwt_idx = 0;
     auto bwt_data = BWTEncode(rle_data, bwt_idx);
     auto mtf_data = MTFEncode(bwt_data);
     bwt_data.clear();
-
     std::vector<uint8_t> prefix = {
       (uint8_t)((bwt_idx >> 24) & 0xFF),
       (uint8_t)((bwt_idx >> 16) & 0xFF),
       (uint8_t)((bwt_idx >> 8) & 0xFF),
       (uint8_t)(bwt_idx & 0xFF)
     };
-
     auto ppm5 = CompressPPM5(mtf_data);
     std::vector<uint8_t> full;
     full.reserve(4 + ppm5.size());
@@ -1910,20 +1892,17 @@ std::vector<uint8_t> CompressHybrid(const std::vector<uint8_t> &in) {
     TryCompress(best, best_mode, CompressPPM5(lzma_data), 42);
     TryCompress(best, best_mode, CompressPPM6(lzma_data), 43);
 
-    // LZMA+BWT for very structured data
     if (lzma_data.size() <= MAX_BWT_SIZE) {
       uint32_t bwt_idx = 0;
       auto bwt_data = BWTEncode(lzma_data, bwt_idx);
       auto mtf_data = MTFEncode(bwt_data);
       bwt_data.clear();
-
       std::vector<uint8_t> prefix = {
         (uint8_t)((bwt_idx >> 24) & 0xFF),
         (uint8_t)((bwt_idx >> 16) & 0xFF),
         (uint8_t)((bwt_idx >> 8) & 0xFF),
         (uint8_t)(bwt_idx & 0xFF)
       };
-
       auto ppm5 = CompressPPM5(mtf_data);
       std::vector<uint8_t> full;
       full.reserve(4 + ppm5.size());
