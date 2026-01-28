@@ -19,6 +19,14 @@ add_executable(kcomp
   src/models/model257.cpp
   src/models/ppm.cpp
   src/models/rle.cpp
+  src/models/lz77.cpp
+  src/models/lzopt.cpp
+  src/models/lzx.cpp
+  src/models/bwt.cpp
+  src/models/mixer.cpp
+  src/models/cm.cpp
+  src/models/dict.cpp
+  src/models/lzma.cpp
 )
 
 target_include_directories(kcomp PRIVATE src)

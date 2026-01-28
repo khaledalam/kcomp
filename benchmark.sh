@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-input="${1:-enwik_10k}"
+input="${1:-testdata/wikipedia_10k.txt}"
 bin="${BIN:-./build/kcomp}"
 
 mkdir -p outputs

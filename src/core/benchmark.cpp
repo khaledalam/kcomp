@@ -73,5 +73,44 @@ int Bench(const std::string &path) {
                (t3 - t2) / 1e9);
   }
 
+  {
+    uint64_t t0 = NowNs();
+    auto out = CompressPPM3(input);
+    uint64_t t1 = NowNs();
+    uint64_t t2 = NowNs();
+    auto back = DecompressPPM3(out);
+    uint64_t t3 = NowNs();
+    if (back != input)
+      return 2;
+    PrintBench("ppm3", input.size(), out.size(), (t1 - t0) / 1e9,
+               (t3 - t2) / 1e9);
+  }
+
+  {
+    uint64_t t0 = NowNs();
+    auto out = CompressPPM5(input);
+    uint64_t t1 = NowNs();
+    uint64_t t2 = NowNs();
+    auto back = DecompressPPM5(out);
+    uint64_t t3 = NowNs();
+    if (back != input)
+      return 2;
+    PrintBench("ppm5", input.size(), out.size(), (t1 - t0) / 1e9,
+               (t3 - t2) / 1e9);
+  }
+
+  {
+    uint64_t t0 = NowNs();
+    auto out = CompressHybrid(input);
+    uint64_t t1 = NowNs();
+    uint64_t t2 = NowNs();
+    auto back = DecompressHybrid(out);
+    uint64_t t3 = NowNs();
+    if (back != input)
+      return 2;
+    PrintBench("hybrid", input.size(), out.size(), (t1 - t0) / 1e9,
+               (t3 - t2) / 1e9);
+  }
+
   return 0;
 }

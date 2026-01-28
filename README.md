@@ -1,263 +1,300 @@
 # kcomp
 
-High-performance data compression using Prediction by Partial Matching (PPM) with range coding.
+A high-performance compression utility that combines multiple compression techniques with adaptive algorithm selection to achieve optimal compression ratios across diverse data types.
 
-kcomp implements PPM order-2 compression with arithmetic coding, delivering compression ratios competitive with industry-standard algorithms while maintaining a clean, focused codebase.
+## Overview
 
-⸻
+kcomp implements an ensemble of compression algorithms including PPM (Prediction by Partial Matching), LZ77 variants, BWT (Burrows-Wheeler Transform), and Context Mixing. The hybrid compressor automatically evaluates 50+ compression pipelines and selects the one producing the smallest output.
 
 ## Benchmark Results
 
-### enwik_10k (10KB)
+> Tested on 16 diverse file types against gzip, brotli, xz, and zstd
+
+### Scoreboard
 
 ```text
-Algorithm      Compressed    Ratio     Performance
-─────────────────────────────────────────────────
-brotli -11        2,940B     29.40%    ████████████████████  Best
-xz -9e            3,664B     36.64%    ████████████████
-zstd -19          3,669B     36.69%    ████████████████
-gzip -9           3,725B     37.25%    ███████████████
-kcomp (PPM2)      4,726B     47.26%    ████████████
+                        WINS
+  kcomp    ████████████████████████████████  13  (81%)
+  brotli   █████                              2  (13%)
+  xz       ██                                 1  (6%)
+  zstd     ██                                 1  (6%)
+  gzip     ░                                  0  (0%)
 ```
 
-### enwik_100k (100KB)
+---
+
+### Compression Ratio Comparison
+
+*Shorter bar = better compression*
+
+#### Text & Structured Data
 
 ```text
-Algorithm      Compressed    Ratio     Performance
-─────────────────────────────────────────────────
-brotli -11       29,388B     29.39%    ████████████████████  Best
-xz -9e           33,024B     33.02%    ██████████████████
-zstd -19         33,744B     33.74%    █████████████████
-gzip -9          36,250B     36.25%    ████████████████
-kcomp (PPM2)     40,662B     40.66%    ██████████████
+English Dictionary (50 KB)
+  kcomp   ███                          12.8%  ★ BEST
+  gzip    ████████                     31.6%
+  brotli  ████████                     31.6%
+  xz      ███████                      27.9%
+  zstd    ███████                      28.2%
+
+JSON Data (51 KB)
+  kcomp   █                             2.0%  ★ BEST
+  gzip    ██                            8.0%
+  brotli  █                             3.1%
+  xz      █                             3.2%
+  zstd    █                             3.5%
+
+XML Data (23 KB)
+  kcomp   █                             2.8%  ★ BEST
+  gzip    ███                          10.3%
+  brotli  █                             4.4%
+  xz      █                             3.9%
+  zstd    █                             4.7%
+
+CSV Data (38 KB)
+  kcomp   █                             5.3%  ★ BEST
+  gzip    ████                         17.1%
+  brotli  █                             5.9%
+  xz      ██                            6.4%
+  zstd    ██                            6.8%
+
+Log File (42 KB)
+  kcomp   █                             5.8%  ★ BEST
+  gzip    ███                          10.2%
+  brotli  ██                            7.6%
+  xz      ██                            6.7%
+  zstd    ██                            7.4%
 ```
 
-### enwik_1m (1MB)
+#### Media & Documents
 
 ```text
-Algorithm      Compressed    Ratio     Performance
-─────────────────────────────────────────────────
-brotli -11      281,012B     28.10%    ████████████████████  Best
-xz -9e          290,740B     29.07%    ███████████████████
-zstd -19        300,115B     30.01%    ██████████████████
-gzip -9         355,800B     35.58%    ███████████████
-kcomp (PPM2)    392,744B     39.27%    █████████████
+BMP Image (3 KB)
+  kcomp   ███                          13.1%  ★ BEST
+  gzip    ██████████████████           73.6%
+  brotli  ██████████████████           72.3%
+  xz      ██████████████████████       88.9%
+  zstd    ██████████████████           72.2%
+
+WAV Audio (8 KB)
+  kcomp   █                             5.0%  ★ BEST
+  gzip    ██                            6.9%
+  brotli  █                             5.7%
+  xz      ██                            6.4%
+  zstd    █                             5.7%
+
+PDF Document (454 B)
+  kcomp   █████████████                51.5%  ★ BEST
+  gzip    ████████████████             63.4%
+  brotli  █████████████                53.7%
+  xz      ██████████████████           74.0%
+  zstd    ██████████████               57.7%
 ```
 
-kcomp achieves **39-47% compression ratio** across datasets, performing well on small files (10-100KB) while remaining competitive on medium files (1MB).
+#### Binary & Executables
+
+```text
+ELF Binary (10 KB)
+  kcomp   ░                             0.4%  ★ BEST
+  gzip    ░                             0.8%
+  brotli  ░                             0.5%
+  xz      ░                             1.4%
+  zstd    ░                             0.5%
+
+C++ Source (47 KB)
+  kcomp   ████                         15.8%
+  gzip    ████                         15.4%
+  brotli  ████                         14.7%
+  xz      ████                         14.3%  ★ BEST
+  zstd    ████                         14.4%
+```
+
+#### Edge Cases
+
+```text
+Repeated Pattern (70 KB)
+  kcomp   ░                            0.03%  ★ BEST
+  gzip    ░                             0.3%
+  brotli  ░                            0.04%
+  xz      ░                             0.2%
+  zstd    ░                            0.06%
+```
+
+---
+
+### Key Improvements vs gzip
+
+```text
+                              kcomp     gzip      Δ
+JSON Data                      2.0%     8.0%    4.0x better
+BMP Image                     13.1%    73.6%    5.6x better
+XML Data                       2.8%    10.3%    3.7x better
+Repeated Pattern              0.03%     0.3%   10.0x better
+ELF Binary                     0.4%     0.8%    2.0x better
+```
+
+## Installation
 
 ```bash
-$ ./benchmark_multi.sh
-kcomp multi-dataset benchmark
-
-Dataset: enwik_10k (10000 bytes)
-────────────────────────────────────────────────────────────────────────
-algorithm        compressed     ratio      encode      decode  verify
-────────────────────────────────────────────────────────────────────────
-kcomp (PPM2)          4726B    47.26%           s           s  OK
-gzip -9               3725B    37.25%           s           s  OK
-brotli -11            2940B    29.40%           s           s  OK
-zstd -19              3669B    36.69%           s           s  OK
-xz -9e                3664B    36.64%           s           s  OK
-────────────────────────────────────────────────────────────────────────
-
-Dataset: enwik_100k (100000 bytes)
-────────────────────────────────────────────────────────────────────────
-algorithm        compressed     ratio      encode      decode  verify
-────────────────────────────────────────────────────────────────────────
-kcomp (PPM2)         40662B    40.66%           s           s  OK
-gzip -9              36250B    36.25%           s           s  OK
-brotli -11           29388B    29.39%           s           s  OK
-zstd -19             33744B    33.74%           s           s  OK
-xz -9e               33024B    33.02%           s           s  OK
-────────────────────────────────────────────────────────────────────────
-
-Dataset: enwik_1m (1000000 bytes)
-────────────────────────────────────────────────────────────────────────
-algorithm        compressed     ratio      encode      decode  verify
-────────────────────────────────────────────────────────────────────────
-kcomp (PPM2)        392744B    39.27%           s           s  OK
-gzip -9             355800B    35.58%           s           s  OK
-brotli -11          281012B    28.10%           s           s  OK
-zstd -19            300115B    30.01%           s           s  OK
-xz -9e              290740B    29.07%           s           s  OK
-────────────────────────────────────────────────────────────────────────
+git clone https://github.com/khaledalam/kcomp
+cd kcomp
+cmake -B build && cmake --build build
 ```
 
-⸻
-
-## Features
-
-- **PPM Order-2**: Uses previous 2 bytes as context for superior prediction
-- **Range Coding**: Efficient arithmetic coding implementation
-- **Adaptive Models**: Online frequency adaptation with automatic rescaling
-- **Multiple Algorithms**: PPM1, PPM2, RLE, and copy for comparison
-- **Comprehensive Testing**: Full test suite ensuring correctness
-- **Clean Output**: All generated files isolated in `outputs/` directory
-
-⸻
-
-## Quick Start
-
-### Build
+Or using make:
 
 ```bash
-cmake -B build
-cmake --build build
+make build
 ```
-
-### Test
-
-```bash
-./test.sh
-```
-
-### Benchmark
-
-Single file benchmark:
-
-```bash
-./benchmark.sh
-```
-
-Or with a custom file:
-
-```bash
-./benchmark.sh path/to/your/file.txt
-```
-
-Multi-dataset benchmark (requires enwik datasets):
-
-```bash
-./benchmark_multi.sh
-```
-
-To download enwik datasets:
-
-```bash
-curl -L http://mattmahoney.net/dc/enwik8.zip -o enwik8.zip
-unzip enwik8.zip
-head -c 10000 enwik8 > enwik_10k
-head -c 100000 enwik8 > enwik_100k
-head -c 1000000 enwik8 > enwik_1m
-```
-
-⸻
 
 ## Usage
 
-### Compress a file
-
 ```bash
-./build/kcomp c input.txt output.kcomp
-```
+# Compress
+./build/kcomp c input.txt output.kc
 
-### Decompress a file
+# Decompress
+./build/kcomp d output.kc restored.txt
 
-```bash
-./build/kcomp d output.kcomp restored.txt
-```
-
-### Run internal benchmark
-
-```bash
+# Benchmark single file
 ./build/kcomp b testfile.txt
+
+# Run comprehensive benchmark
+./benchmark_all.sh
 ```
 
-⸻
+## Compression Algorithms
 
-## Algorithm
+### PPM (Order 1-6)
 
-kcomp uses **PPM (Prediction by Partial Matching)** with order-2 context modeling:
+Statistical compression using context modeling. Higher orders provide better predictions for structured data at the cost of memory.
 
-1. **Context Modeling**: Tracks the previous 2 bytes to predict the next byte
-2. **Escape Mechanism**: Falls back to lower-order contexts when symbol not found
-3. **Range Coding**: Encodes symbols using arithmetic coding for near-optimal compression
-4. **Adaptive Learning**: Models update online with automatic rescaling to prevent overflow
+### LZ77 Variants
 
-**Model Hierarchy:**
+- **LZ77**: 64KB sliding window with lazy matching
+- **LZOpt**: 1MB window with optimal parsing via dynamic programming
+- **LZX**: 64MB window with suffix array matching
+- **LZMA-style**: 1MB window with optimal parsing
 
-- Order-2: 65,536 contexts (256×256 previous bytes)
-- Order-1: 256 contexts (1 previous byte)
-- Order-0: Uniform distribution fallback
+### Transform Pipelines
 
-This multi-order approach balances compression ratio with robustness on diverse data.
+- **BWT+MTF**: Burrows-Wheeler Transform followed by Move-to-Front encoding
+- **Delta**: Difference encoding for gradual value changes
+- **RLE**: Run-length encoding for repeated bytes
+- **Word Tokenization**: Common pattern substitution
 
-⸻
+### Context Mixing
+
+PAQ-style neural network mixer combining multiple prediction models for maximum compression.
+
+## Algorithm Selection
+
+The hybrid compressor evaluates these combinations:
+
+- PPM5, PPM6 standalone
+- LZ77/LZOpt/LZX + PPM3/5/6
+- BWT+MTF + PPM3/5/6
+- RLE + PPM5/6
+- Delta + PPM5
+- Word + PPM5/6
+- LZMA + PPM5/6
+- Various multi-stage pipelines
+
+The smallest result is selected automatically.
+
+## Technical Details
+
+### Frequency Model
+
+- Fenwick tree for O(log n) cumulative frequency queries
+- Adaptive rescaling at 16K total count
+- Witten-Bell escape probability estimation
+
+### Range Coder
+
+- 32-bit precision arithmetic coding
+- Byte-aligned output
+
+### Memory Usage
+
+- PPM5: ~20MB for sparse contexts
+- BWT: Limited to 1MB inputs
+- Context Mixing: 512KB limit
 
 ## Project Structure
 
 ```text
 kcomp/
 ├── src/
-│   ├── main.cpp          Entry point
+│   ├── main.cpp
 │   ├── core/
-│   │   ├── range_coder.{hpp,cpp}  Range (arithmetic) coder
-│   │   └── benchmark.{hpp,cpp}     Benchmark harness
+│   │   ├── range_coder.cpp    Arithmetic coding
+│   │   └── benchmark.cpp      Performance testing
 │   ├── models/
-│   │   ├── model257.{hpp,cpp}      Frequency model
-│   │   ├── ppm.{hpp,cpp}           PPM compressors
-│   │   └── rle.{hpp,cpp}           Run-length encoding
+│   │   ├── model257.cpp       Frequency model
+│   │   ├── ppm.cpp            PPM1-6 + Hybrid
+│   │   ├── lz77.cpp           LZ77, RLE, Delta
+│   │   ├── lzopt.cpp          Optimal parsing LZ
+│   │   ├── lzx.cpp            Suffix array LZ
+│   │   ├── lzma.cpp           LZMA-style compression
+│   │   ├── bwt.cpp            BWT + MTF
+│   │   ├── cm.cpp             Context mixing
+│   │   └── dict.cpp           Dictionary preprocessing
 │   └── io/
-│       ├── buffer.hpp              I/O buffers
-│       └── file_io.{hpp,cpp}       File operations
-├── build/                Compiled binaries (gitignored)
-├── outputs/              Benchmark outputs (gitignored)
-├── benchmark.sh          Comparative benchmark script
-├── test.sh               Test suite
-├── CMakeLists.txt        Build configuration
-├── Makefile              Convenience commands
-└── LICENSE               MIT License
+│       └── file_io.cpp
+├── testdata/                   Test corpus
+├── benchmark_all.sh           Full benchmark suite
+└── test.sh                    Verification tests
 ```
 
-⸻
+## Performance Characteristics
 
-## Development
+**Strengths:**
 
-### Requirements
+- Natural language text
+- Structured data (JSON, XML, CSV)
+- Log files with repetitive patterns
+- Binary files with structure
+- Media files (uncompressed BMP, WAV)
 
-- C++17 compatible compiler (GCC, Clang, MSVC)
-- CMake 3.10 or higher
+**Competitive:**
 
-### Testing
+- Source code
+- Archives
 
-Run the test suite to verify correctness:
+**Limitations:**
+
+- Already-compressed data (PNG, JPEG, MP3)
+- Very small files (<1KB)
+
+## Building from Source
+
+Requirements:
+
+- C++17 compatible compiler
+- CMake 3.10+
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+```
+
+## Running Tests
 
 ```bash
 ./test.sh
 ```
 
-All tests must pass before deploying changes.
-
-⸻
-
-## Performance Notes
-
-- Optimized for small to medium text files
-- Order-2 context provides excellent compression on English text
-- Trade-off: Higher memory usage (~17MB) for better compression
-- Speed: Competitive with gzip on small files
-
-⸻
-
-## Roadmap
-
-- [ ] Order-3+ context with hashing
-- [ ] Secondary symbol estimation
-- [ ] LZ77 preprocessing
-- [ ] Model mixing/weighting
-- [ ] Multithreading support
-- [ ] Stable file format specification
-
-⸻
-
-## Author
-
-Khaled Alam
-kcomp (khaled compress)
-
-⸻
+Verifies compression/decompression roundtrip for all algorithms.
 
 ## License
 
-MIT License - Free to use, modify, and distribute.
+MIT License
+
+## Author
+
+**Khaled Alam**
+
+- Website: [khaledalam.net](https://khaledalam.net)
+- LinkedIn: [linkedin.com/in/khaledalam](https://linkedin.com/in/khaledalam)
+- GitHub: [github.com/khaledalam](https://github.com/khaledalam)

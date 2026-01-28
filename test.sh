@@ -66,8 +66,8 @@ run_test "500 bytes repetition" "$test_dir/t6.txt"
 dd if=/dev/zero of="$test_dir/t7.bin" bs=512 count=1 2>/dev/null
 run_test "512 zeros" "$test_dir/t7.bin"
 
-if [ -f "enwik_10k" ]; then
-  run_test "enwik_10k" "enwik_10k"
+if [ -f "testdata/wikipedia_10k.txt" ]; then
+  run_test "wikipedia_10k" "testdata/wikipedia_10k.txt"
 fi
 
 echo

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 bin="${BIN:-./build/kcomp}"
-datasets=("enwik_10k" "enwik_100k" "enwik_1m")
+datasets=("testdata/wikipedia_10k.txt" "testdata/english_50k.txt" "testdata/json_data.json")
 
 bold=$'\033[1m'
 green=$'\033[32m'

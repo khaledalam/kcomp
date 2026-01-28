@@ -18,7 +18,7 @@ int main(int argc, char **argv) {
       if (argc != 4)
         return 1;
       auto input = ReadAll(argv[2]);
-      auto out = CompressPPM2(input);
+      auto out = CompressHybrid(input);
       WriteAll(argv[3], out);
       return 0;
     }
@@ -27,7 +27,7 @@ int main(int argc, char **argv) {
       if (argc != 4)
         return 1;
       auto input = ReadAll(argv[2]);
-      auto out = DecompressPPM2(input);
+      auto out = DecompressHybrid(input);
       WriteAll(argv[3], out);
       return 0;
     }

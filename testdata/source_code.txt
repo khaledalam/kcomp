@@ -1,0 +1,1931 @@
+#include "lz77.hpp"
+#include "ppm.hpp"
+#include <vector>
+
+// Hash chain for efficient match finding
+class HashChain {
+public:
+  HashChain(size_t data_size, size_t hash_bits, size_t window)
+      : head(1u << hash_bits, -1), prev(data_size, -1), window_size(window),
+        hash_mask((1u << hash_bits) - 1) {}
+
+  uint32_t Hash3(const uint8_t *p) const {
+    return ((uint32_t)p[0] ^ ((uint32_t)p[1] << 5) ^ ((uint32_t)p[2] << 10)) &
+           hash_mask;
+  }
+
+  void Insert(int pos, const uint8_t *data) {
+    uint32_t h = Hash3(data + pos);
+    prev[pos] = head[h];
+    head[h] = pos;
+  }
+
+  // Find best match at position pos
+  std::pair<int, int> FindMatch(int pos, const uint8_t *data, int end,
+                                int min_match, int max_match) const {
+    if (pos + min_match > end)
+      return {0, 0};
+
+    int best_len = 0, best_dist = 0;
+    uint32_t h = Hash3(data + pos);
+    int chain_pos = head[h];
+    int chain_limit = 64; // Limit chain traversal
+
+    while (chain_pos >= 0 && chain_limit-- > 0) {
+      int dist = pos - chain_pos;
+      if (dist > (int)window_size)
+        break;
+
+      // Compare strings
+      int len = 0;
+      while (pos + len < end && len < max_match &&
+             data[chain_pos + len] == data[pos + len]) {
+        len++;
+      }
+
+      if (len >= min_match && len > best_len) {
+        best_len = len;
+        best_dist = dist;
+      }
+
+      chain_pos = prev[chain_pos];
+    }
+    return {best_len, best_dist};
+  }
+
+private:
+  std::vector<int> head;
+  std::vector<int> prev;
+  size_t window_size;
+  uint32_t hash_mask;
+};
+
+// Variable-length encoding for length and distance
+static void WriteVarLen(std::vector<uint8_t> &out, uint32_t val) {
+  while (val >= 128) {
+    out.push_back((uint8_t)(val | 128));
+    val >>= 7;
+  }
+  out.push_back((uint8_t)val);
+}
+
+static uint32_t ReadVarLen(const uint8_t *&p) {
+  uint32_t val = 0;
+  int shift = 0;
+  while (*p & 128) {
+    val |= (*p & 127) << shift;
+    shift += 7;
+    p++;
+  }
+  val |= (*p) << shift;
+  p++;
+  return val;
+}
+
+std::vector<uint8_t> LZ77Encode(const std::vector<uint8_t> &in,
+                                const LZ77Config &cfg) {
+  if (in.empty())
+    return {};
+
+  std::vector<uint8_t> out;
+  out.reserve(in.size());
+
+  HashChain chain(in.size(), cfg.hash_bits, cfg.window_size);
+  const uint8_t *data = in.data();
+  int end = (int)in.size();
+
+  // Output format:
+  // 0 + literal: single literal byte
+  // 1 + length + distance: match (length-3, distance-1 varint encoded)
+
+  int pos = 0;
+  while (pos < end) {
+    if (pos + (int)cfg.min_match > end) {
+      // Output remaining as literals
+      out.push_back(0);
+      out.push_back(data[pos++]);
+      continue;
+    }
+
+    auto [len, dist] = chain.FindMatch(pos, data, end, (int)cfg.min_match,
+                                       (int)cfg.max_match);
+
+    if (len >= (int)cfg.min_match) {
+      // Output match
+      out.push_back(1);
+      WriteVarLen(out, len - cfg.min_match);
+      WriteVarLen(out, dist - 1);
+
+      // Insert all positions in the match
+      for (int i = 0; i < len; i++) {
+        chain.Insert(pos + i, data);
+      }
+      pos += len;
+    } else {
+      // Output literal
+      out.push_back(0);
+      out.push_back(data[pos]);
+      chain.Insert(pos, data);
+      pos++;
+    }
+  }
+
+  return out;
+}
+
+std::vector<uint8_t> LZ77Decode(const std::vector<uint8_t> &in) {
+  std::vector<uint8_t> out;
+  out.reserve(in.size() * 2);
+
+  const uint8_t *p = in.data();
+  const uint8_t *end = p + in.size();
+
+  while (p < end) {
+    uint8_t flag = *p++;
+    if (flag == 0) {
+      // Literal
+      if (p >= end)
+        break;
+      out.push_back(*p++);
+    } else {
+      // Match
+      uint32_t len = ReadVarLen(p) + 3;
+      uint32_t dist = ReadVarLen(p) + 1;
+
+      // Copy from back-reference
+      size_t start = out.size() - dist;
+      for (uint32_t i = 0; i < len; i++) {
+        out.push_back(out[start + i]);
+      }
+    }
+  }
+
+  return out;
+}
+
+std::vector<uint8_t> CompressLZPPM(const std::vector<uint8_t> &in) {
+  // Step 1: LZ77 preprocessing
+  auto lz_out = LZ77Encode(in);
+
+  // Step 2: PPM3 on LZ77 output
+  auto ppm_out = CompressPPM3(lz_out);
+
+  // Prepend original size (4 bytes big-endian)
+  std::vector<uint8_t> result;
+  result.reserve(ppm_out.size() + 4);
+  uint32_t orig_size = (uint32_t)in.size();
+  result.push_back((orig_size >> 24) & 0xFF);
+  result.push_back((orig_size >> 16) & 0xFF);
+  result.push_back((orig_size >> 8) & 0xFF);
+  result.push_back(orig_size & 0xFF);
+  result.insert(result.end(), ppm_out.begin(), ppm_out.end());
+
+  return result;
+}
+
+std::vector<uint8_t> DecompressLZPPM(const std::vector<uint8_t> &in) {
+  if (in.size() < 4)
+    return {};
+
+  // Read original size
+  uint32_t orig_size = ((uint32_t)in[0] << 24) | ((uint32_t)in[1] << 16) |
+                       ((uint32_t)in[2] << 8) | in[3];
+
+  // Step 1: PPM3 decompress
+  std::vector<uint8_t> ppm_in(in.begin() + 4, in.end());
+  auto lz_out = DecompressPPM3(ppm_in);
+
+  // Step 2: LZ77 decode
+  auto result = LZ77Decode(lz_out);
+
+  // Verify size
+  if (result.size() != orig_size) {
+    // Size mismatch - return empty
+    return {};
+  }
+
+  return result;
+}
+#include "model257.hpp"
+
+void Rescale(std::array<uint16_t, 257> &cnt, uint32_t &total,
+             uint16_t &unique_count) {
+  uint32_t t = 0;
+  uint16_t u = 0;
+  for (int i = 0; i < 257; ++i) {
+    uint16_t v = cnt[i];
+    v = (uint16_t)((v + 1) >> 1);
+    if (v == 0 && i == 256)
+      v = 1;
+    cnt[i] = v;
+    t += v;
+    // Recount unique symbols (those with count > 0, excluding escape)
+    if (i < 256 && v > 0)
+      u++;
+  }
+  total = t;
+  unique_count = u;
+  if (total == 0) {
+    cnt[256] = 1;
+    total = 1;
+  }
+}
+
+void Model257::InitEscOnly() {
+  cnt.fill(0);
+  cnt[256] = 1;
+  total = 1;
+  FenwickBuild();
+}
+
+void Model257::InitUniform256() {
+  cnt.fill(0);
+  for (int i = 0; i < 256; ++i)
+    cnt[i] = 1;
+  cnt[256] = 1;
+  total = 257;
+  FenwickBuild();
+}
+
+uint16_t Model257::Get(int sym) const { return cnt[sym]; }
+
+void Model257::Bump(int sym) {
+  // Track unique symbols for Witten-Bell escape estimation
+  if (sym < 256 && cnt[sym] == 0) {
+    unique_count++;
+  }
+  cnt[sym] += 1;
+  total += 1;
+  FenwickAdd(sym, 1);
+
+  // Rescale at 14 bits for better range coder precision
+  if (total >= (1u << 14)) {
+    Rescale(cnt, total, unique_count);
+    FenwickBuild();
+  }
+}
+
+void Model257::Cum(int sym, uint32_t &lo, uint32_t &hi) {
+  const uint32_t pref = FenwickPrefix(sym);
+  hi = pref;
+  if (sym <= 0)
+    lo = 0;
+  else
+    lo = FenwickPrefix(sym - 1);
+}
+
+int Model257::FindByFreq(uint32_t f) {
+  int idx = 0;
+  uint32_t bitmask = 1;
+  while ((bitmask << 1) <= 257)
+    bitmask <<= 1;
+
+  while (bitmask) {
+    int next = idx + (int)bitmask;
+    if (next <= 257 && bit[next] <= f) {
+      idx = next;
+      f -= bit[next];
+    }
+    bitmask >>= 1;
+  }
+
+  if (idx > 256)
+    return 256;
+  return idx;
+}
+
+void Model257::FenwickBuild() {
+  bit.fill(0);
+  for (int sym = 0; sym < 257; ++sym)
+    FenwickAdd(sym, cnt[sym]);
+}
+
+void Model257::FenwickAdd(int sym, uint32_t delta) {
+  int i = sym + 1;
+  while (i <= 257) {
+    bit[i] += delta;
+    i += i & -i;
+  }
+}
+
+uint32_t Model257::FenwickPrefix(int sym) const {
+  if (sym < 0)
+    return 0;
+  uint32_t s = 0;
+  int i = sym + 1;
+  while (i > 0) {
+    s += bit[i];
+    i -= i & -i;
+  }
+  return s;
+}
+
+// Witten-Bell escape estimation:
+// Escape probability = unique_count / (symbol_total + unique_count)
+// where symbol_total = total - cnt[256] (excluding the escape count)
+
+uint32_t Model257::GetWBTotal() const {
+  // Total for Witten-Bell: symbol frequencies + unique_count (as escape prob)
+  // Minimum escape of 1 when no unique symbols yet
+  uint32_t esc = unique_count > 0 ? unique_count : 1;
+  return (total - cnt[256]) + esc;
+}
+
+void Model257::CumWB(int sym, uint32_t &lo, uint32_t &hi, uint32_t &tot) {
+  uint32_t esc = unique_count > 0 ? unique_count : 1;
+  tot = (total - cnt[256]) + esc;
+
+  if (sym == 256) {
+    // Escape symbol: comes after all regular symbols
+    lo = total - cnt[256];
+    hi = tot;
+  } else {
+    // Regular symbol: use Fenwick tree for cumulative
+    const uint32_t pref = FenwickPrefix(sym);
+    hi = pref;
+    if (sym <= 0)
+      lo = 0;
+    else
+      lo = FenwickPrefix(sym - 1);
+  }
+}
+
+int Model257::FindByFreqWB(uint32_t f, uint32_t tot) {
+  uint32_t symbol_total = total - cnt[256];
+
+  // If frequency falls in escape range
+  if (f >= symbol_total) {
+    return 256;
+  }
+
+  // Otherwise, find symbol using Fenwick tree
+  int idx = 0;
+  uint32_t bitmask = 1;
+  while ((bitmask << 1) <= 257)
+    bitmask <<= 1;
+
+  while (bitmask) {
+    int next = idx + (int)bitmask;
+    if (next <= 256 && bit[next] <= f) { // Stop before escape symbol
+      idx = next;
+      f -= bit[next];
+    }
+    bitmask >>= 1;
+  }
+
+  if (idx > 255)
+    return 255;
+  return idx;
+}
+
+// Exclusion support for PPM
+
+void Model257::FillExclusion(std::bitset<256> &excl) const {
+  for (int i = 0; i < 256; ++i) {
+    if (cnt[i] > 0) {
+      excl[i] = true;
+    }
+  }
+}
+
+uint32_t Model257::GetWBTotalEx(const std::bitset<256> &excl) const {
+  uint32_t sym_total = 0;
+  uint16_t unique_ex = 0;
+  for (int i = 0; i < 256; ++i) {
+    if (!excl[i] && cnt[i] > 0) {
+      sym_total += cnt[i];
+      unique_ex++;
+    }
+  }
+  // Witten-Bell escape: unique symbols seen (not excluded)
+  uint32_t esc = unique_ex > 0 ? unique_ex : 1;
+  return sym_total + esc;
+}
+
+void Model257::CumWBEx(int sym, const std::bitset<256> &excl, uint32_t &lo,
+                       uint32_t &hi, uint32_t &tot) {
+  uint32_t sym_total = 0;
+  uint16_t unique_ex = 0;
+
+  // Calculate totals excluding excluded symbols
+  for (int i = 0; i < 256; ++i) {
+    if (!excl[i] && cnt[i] > 0) {
+      sym_total += cnt[i];
+      unique_ex++;
+    }
+  }
+
+  uint32_t esc = unique_ex > 0 ? unique_ex : 1;
+  tot = sym_total + esc;
+
+  if (sym == 256) {
+    // Escape symbol
+    lo = sym_total;
+    hi = tot;
+  } else {
+    // Regular symbol - compute cumulative excluding excluded symbols
+    uint32_t c = 0;
+    for (int i = 0; i < sym; ++i) {
+      if (!excl[i]) {
+        c += cnt[i];
+      }
+    }
+    lo = c;
+    hi = c + cnt[sym];
+  }
+}
+
+int Model257::FindByFreqWBEx(uint32_t f, const std::bitset<256> &excl) {
+  uint32_t sym_total = 0;
+  for (int i = 0; i < 256; ++i) {
+    if (!excl[i] && cnt[i] > 0) {
+      sym_total += cnt[i];
+    }
+  }
+
+  // If frequency falls in escape range
+  if (f >= sym_total) {
+    return 256;
+  }
+
+  // Linear search through non-excluded symbols
+  uint32_t c = 0;
+  for (int i = 0; i < 256; ++i) {
+    if (excl[i])
+      continue;
+    uint32_t next = c + cnt[i];
+    if (f < next)
+      return i;
+    c = next;
+  }
+  return 256;
+}
+#include "ppm.hpp"
+#include "../core/range_coder.hpp"
+#include "../io/buffer.hpp"
+#include "model257.hpp"
+#include <array>
+#include <unordered_map>
+#include <bitset>
+
+std::vector<uint8_t> CompressPPM1(const std::vector<uint8_t> &in) {
+  std::array<Model257, 256> ctx{};
+  for (auto &m : ctx)
+    m.InitEscOnly();
+
+  Model257 order0;
+  order0.InitUniform256();
+
+  OutBuf out;
+  RangeEnc enc;
+  enc.Init(out);
+
+  uint8_t prev = 0;
+
+  for (uint8_t b : in) {
+    Model257 &m = ctx[prev];
+
+    if (m.Get(b) != 0) {
+      uint32_t lo, hi;
+      m.Cum(b, lo, hi);
+      enc.Encode(lo, hi, m.total);
+    } else {
+      uint32_t lo, hi;
+      m.Cum(256, lo, hi);
+      enc.Encode(lo, hi, m.total);
+
+      uint32_t lo2, hi2;
+      order0.Cum(b, lo2, hi2);
+      enc.Encode(lo2, hi2, order0.total);
+    }
+
+    m.Bump(b);
+    order0.Bump(b);
+    prev = b;
+  }
+
+  {
+    Model257 &m = ctx[prev];
+    uint32_t lo, hi;
+    m.Cum(256, lo, hi);
+    enc.Encode(lo, hi, m.total);
+
+    uint32_t lo2, hi2;
+    order0.Cum(256, lo2, hi2);
+    enc.Encode(lo2, hi2, order0.total);
+  }
+
+  enc.Finish();
+  return out.data;
+}
+
+std::vector<uint8_t> DecompressPPM1(const std::vector<uint8_t> &in) {
+  std::array<Model257, 256> ctx{};
+  for (auto &m : ctx)
+    m.InitEscOnly();
+
+  Model257 order0;
+  order0.InitUniform256();
+
+  InBuf ib{in.data(), in.data() + in.size()};
+  RangeDec dec;
+  dec.Init(ib);
+
+  std::vector<uint8_t> out;
+  out.reserve(in.size() * 3);
+
+  uint8_t prev = 0;
+
+  while (true) {
+    Model257 &m = ctx[prev];
+    uint32_t f = dec.GetFreq(m.total);
+    int sym = m.FindByFreq(f);
+
+    uint32_t lo, hi;
+    m.Cum(sym, lo, hi);
+    dec.Decode(lo, hi, m.total);
+
+    if (sym == 256) {
+      uint32_t f0 = dec.GetFreq(order0.total);
+      int s0 = order0.FindByFreq(f0);
+
+      uint32_t lo0, hi0;
+      order0.Cum(s0, lo0, hi0);
+      dec.Decode(lo0, hi0, order0.total);
+
+      if (s0 == 256)
+        break;
+
+      uint8_t b = (uint8_t)s0;
+      out.push_back(b);
+      m.Bump(b);
+      order0.Bump(b);
+      prev = b;
+    } else {
+      uint8_t b = (uint8_t)sym;
+      out.push_back(b);
+      m.Bump(b);
+      order0.Bump(b);
+      prev = b;
+    }
+  }
+
+  return out;
+}
+
+std::vector<uint8_t> CompressPPM2(const std::vector<uint8_t> &in) {
+  std::vector<Model257> ctx2(256 * 256);
+  std::vector<Model257> ctx1(256);
+
+  for (auto &m : ctx2)
+    m.InitEscOnly();
+  for (auto &m : ctx1)
+    m.InitEscOnly();
+
+  Model257 order0;
+  order0.InitUniform256();
+
+  OutBuf out;
+  RangeEnc enc;
+  enc.Init(out);
+
+  uint8_t prev1 = 0;
+  uint8_t prev2 = 0;
+
+  for (uint8_t b : in) {
+    bool encoded = false;
+    std::bitset<256> excl; // Exclusion set for PPM
+
+    uint32_t idx2 = ((uint32_t)prev2 << 8) | prev1;
+    Model257 &m2 = ctx2[idx2];
+    if (m2.Get(b) != 0) {
+      // Use Witten-Bell escape estimation
+      uint32_t lo, hi, tot;
+      m2.CumWB(b, lo, hi, tot);
+      enc.Encode(lo, hi, tot);
+      encoded = true;
+    } else {
+      // Escape to order-1 using Witten-Bell
+      uint32_t lo, hi, tot;
+      m2.CumWB(256, lo, hi, tot);
+      enc.Encode(lo, hi, tot);
+      // Mark all symbols seen at order-2 as excluded
+      m2.FillExclusion(excl);
+    }
+
+    if (!encoded) {
+      Model257 &m1 = ctx1[prev1];
+      if (m1.Get(b) != 0 && !excl[b]) {
+        // Encode with exclusion
+        uint32_t lo, hi, tot;
+        m1.CumWBEx(b, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        encoded = true;
+      } else {
+        // Escape with exclusion
+        uint32_t lo, hi, tot;
+        m1.CumWBEx(256, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        // Add order-1 symbols to exclusion
+        m1.FillExclusion(excl);
+      }
+    }
+
+    if (!encoded) {
+      // Order-0 with exclusion
+      uint32_t lo, hi, tot;
+      order0.CumWBEx(b, excl, lo, hi, tot);
+      enc.Encode(lo, hi, tot);
+    }
+
+    m2.Bump(b);
+    ctx1[prev1].Bump(b);
+    order0.Bump(b);
+
+    prev2 = prev1;
+    prev1 = b;
+  }
+
+  {
+    // EOF: escape through all levels with exclusion
+    std::bitset<256> excl;
+
+    uint32_t idx2 = ((uint32_t)prev2 << 8) | prev1;
+    Model257 &m2 = ctx2[idx2];
+    uint32_t lo2, hi2, tot2;
+    m2.CumWB(256, lo2, hi2, tot2);
+    enc.Encode(lo2, hi2, tot2);
+    m2.FillExclusion(excl);
+
+    Model257 &m1 = ctx1[prev1];
+    uint32_t lo1, hi1, tot1;
+    m1.CumWBEx(256, excl, lo1, hi1, tot1);
+    enc.Encode(lo1, hi1, tot1);
+    m1.FillExclusion(excl);
+
+    uint32_t lo0, hi0, tot0;
+    order0.CumWBEx(256, excl, lo0, hi0, tot0);
+    enc.Encode(lo0, hi0, tot0);
+  }
+
+  enc.Finish();
+  return out.data;
+}
+
+std::vector<uint8_t> DecompressPPM2(const std::vector<uint8_t> &in) {
+  std::vector<Model257> ctx2(256 * 256);
+  std::vector<Model257> ctx1(256);
+
+  for (auto &m : ctx2)
+    m.InitEscOnly();
+  for (auto &m : ctx1)
+    m.InitEscOnly();
+
+  Model257 order0;
+  order0.InitUniform256();
+
+  InBuf ib{in.data(), in.data() + in.size()};
+  RangeDec dec;
+  dec.Init(ib);
+
+  std::vector<uint8_t> out;
+  out.reserve(in.size() * 3);
+
+  uint8_t prev1 = 0;
+  uint8_t prev2 = 0;
+
+  while (true) {
+    int sym = 256;
+    bool decoded = false;
+    std::bitset<256> excl; // Exclusion set
+
+    uint32_t idx2 = ((uint32_t)prev2 << 8) | prev1;
+    Model257 &m2 = ctx2[idx2];
+    {
+      // Use Witten-Bell for decoding
+      uint32_t tot2 = m2.GetWBTotal();
+      uint32_t f = dec.GetFreq(tot2);
+      sym = m2.FindByFreqWB(f, tot2);
+      uint32_t lo, hi, tot;
+      m2.CumWB(sym, lo, hi, tot);
+      dec.Decode(lo, hi, tot);
+
+      if (sym != 256) {
+        decoded = true;
+      } else {
+        // Build exclusion set from order-2
+        m2.FillExclusion(excl);
+      }
+    }
+
+    if (!decoded) {
+      Model257 &m1 = ctx1[prev1];
+      // Use exclusion-aware methods
+      uint32_t tot1 = m1.GetWBTotalEx(excl);
+      uint32_t f = dec.GetFreq(tot1);
+      sym = m1.FindByFreqWBEx(f, excl);
+      uint32_t lo, hi, tot;
+      m1.CumWBEx(sym, excl, lo, hi, tot);
+      dec.Decode(lo, hi, tot);
+
+      if (sym != 256) {
+        decoded = true;
+      } else {
+        // Add order-1 symbols to exclusion
+        m1.FillExclusion(excl);
+      }
+    }
+
+    if (!decoded) {
+      // Order-0 with exclusion
+      uint32_t tot0 = order0.GetWBTotalEx(excl);
+      uint32_t f = dec.GetFreq(tot0);
+      sym = order0.FindByFreqWBEx(f, excl);
+      uint32_t lo, hi, tot;
+      order0.CumWBEx(sym, excl, lo, hi, tot);
+      dec.Decode(lo, hi, tot);
+
+      if (sym == 256)
+        break;
+    }
+
+    uint8_t b = (uint8_t)sym;
+    out.push_back(b);
+
+    m2.Bump(b);
+    ctx1[prev1].Bump(b);
+    order0.Bump(b);
+
+    prev2 = prev1;
+    prev1 = b;
+  }
+
+  return out;
+}
+
+// PPM5: Order-5 with sparse hash maps for 5,4,3-byte contexts
+// Uses a simple hash function for context lookup
+
+static uint64_t HashContext(const uint8_t *p, int len) {
+  uint64_t h = 0;
+  for (int i = 0; i < len; i++) {
+    h = h * 257 + p[i];
+  }
+  return h;
+}
+
+std::vector<uint8_t> CompressPPM5(const std::vector<uint8_t> &in) {
+  std::unordered_map<uint64_t, Model257> ctx5; // Sparse order-5
+  std::unordered_map<uint64_t, Model257> ctx4; // Sparse order-4
+  std::unordered_map<uint32_t, Model257> ctx3; // Sparse order-3
+  std::vector<Model257> ctx2(256 * 256);
+  std::vector<Model257> ctx1(256);
+
+  for (auto &m : ctx2)
+    m.InitEscOnly();
+  for (auto &m : ctx1)
+    m.InitEscOnly();
+
+  Model257 order0;
+  order0.InitUniform256();
+
+  OutBuf out;
+  RangeEnc enc;
+  enc.Init(out);
+
+  // History buffer for context lookup
+  uint8_t hist[5] = {0, 0, 0, 0, 0};
+
+  for (size_t i = 0; i < in.size(); i++) {
+    uint8_t b = in[i];
+    bool encoded = false;
+    std::bitset<256> excl;
+
+    // Order-5 context (need at least 5 bytes of history)
+    if (i >= 5) {
+      uint64_t idx5 = HashContext(hist, 5);
+      auto it5 = ctx5.find(idx5);
+      if (it5 != ctx5.end() && it5->second.Get(b) != 0) {
+        uint32_t lo, hi, tot;
+        it5->second.CumWB(b, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        encoded = true;
+      } else if (it5 != ctx5.end()) {
+        uint32_t lo, hi, tot;
+        it5->second.CumWB(256, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        it5->second.FillExclusion(excl);
+      }
+    }
+
+    // Order-4 context
+    if (!encoded && i >= 4) {
+      uint64_t idx4 = HashContext(hist + 1, 4);
+      auto it4 = ctx4.find(idx4);
+      if (it4 != ctx4.end() && it4->second.Get(b) != 0 && !excl[b]) {
+        uint32_t lo, hi, tot;
+        it4->second.CumWBEx(b, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        encoded = true;
+      } else if (it4 != ctx4.end()) {
+        uint32_t lo, hi, tot;
+        it4->second.CumWBEx(256, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        it4->second.FillExclusion(excl);
+      }
+    }
+
+    // Order-3 context
+    if (!encoded && i >= 3) {
+      uint32_t idx3 =
+          ((uint32_t)hist[2] << 16) | ((uint32_t)hist[3] << 8) | hist[4];
+      auto it3 = ctx3.find(idx3);
+      if (it3 != ctx3.end() && it3->second.Get(b) != 0 && !excl[b]) {
+        uint32_t lo, hi, tot;
+        it3->second.CumWBEx(b, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        encoded = true;
+      } else if (it3 != ctx3.end()) {
+        uint32_t lo, hi, tot;
+        it3->second.CumWBEx(256, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        it3->second.FillExclusion(excl);
+      }
+    }
+
+    // Order-2 context
+    if (!encoded && i >= 2) {
+      uint32_t idx2 = ((uint32_t)hist[3] << 8) | hist[4];
+      Model257 &m2 = ctx2[idx2];
+      if (m2.Get(b) != 0 && !excl[b]) {
+        uint32_t lo, hi, tot;
+        m2.CumWBEx(b, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        encoded = true;
+      } else {
+        uint32_t lo, hi, tot;
+        m2.CumWBEx(256, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        m2.FillExclusion(excl);
+      }
+    }
+
+    // Order-1 context
+    if (!encoded && i >= 1) {
+      Model257 &m1 = ctx1[hist[4]];
+      if (m1.Get(b) != 0 && !excl[b]) {
+        uint32_t lo, hi, tot;
+        m1.CumWBEx(b, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        encoded = true;
+      } else {
+        uint32_t lo, hi, tot;
+        m1.CumWBEx(256, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        m1.FillExclusion(excl);
+      }
+    }
+
+    // Order-0
+    if (!encoded) {
+      uint32_t lo, hi, tot;
+      order0.CumWBEx(b, excl, lo, hi, tot);
+      enc.Encode(lo, hi, tot);
+    }
+
+    // Update all contexts
+    if (i >= 5)
+      ctx5[HashContext(hist, 5)].Bump(b);
+    if (i >= 4)
+      ctx4[HashContext(hist + 1, 4)].Bump(b);
+    if (i >= 3)
+      ctx3[((uint32_t)hist[2] << 16) | ((uint32_t)hist[3] << 8) | hist[4]]
+          .Bump(b);
+    if (i >= 2)
+      ctx2[((uint32_t)hist[3] << 8) | hist[4]].Bump(b);
+    if (i >= 1)
+      ctx1[hist[4]].Bump(b);
+    order0.Bump(b);
+
+    // Shift history
+    for (int j = 0; j < 4; j++)
+      hist[j] = hist[j + 1];
+    hist[4] = b;
+  }
+
+  // EOF - escape through all levels
+  {
+    std::bitset<256> excl;
+
+    if (in.size() >= 5) {
+      uint64_t idx5 = HashContext(hist, 5);
+      auto it5 = ctx5.find(idx5);
+      if (it5 != ctx5.end()) {
+        uint32_t lo, hi, tot;
+        it5->second.CumWB(256, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        it5->second.FillExclusion(excl);
+      }
+    }
+
+    if (in.size() >= 4) {
+      uint64_t idx4 = HashContext(hist + 1, 4);
+      auto it4 = ctx4.find(idx4);
+      if (it4 != ctx4.end()) {
+        uint32_t lo, hi, tot;
+        it4->second.CumWBEx(256, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        it4->second.FillExclusion(excl);
+      }
+    }
+
+    if (in.size() >= 3) {
+      uint32_t idx3 =
+          ((uint32_t)hist[2] << 16) | ((uint32_t)hist[3] << 8) | hist[4];
+      auto it3 = ctx3.find(idx3);
+      if (it3 != ctx3.end()) {
+        uint32_t lo, hi, tot;
+        it3->second.CumWBEx(256, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        it3->second.FillExclusion(excl);
+      }
+    }
+
+    if (in.size() >= 2) {
+      uint32_t idx2 = ((uint32_t)hist[3] << 8) | hist[4];
+      Model257 &m2 = ctx2[idx2];
+      uint32_t lo2, hi2, tot2;
+      m2.CumWBEx(256, excl, lo2, hi2, tot2);
+      enc.Encode(lo2, hi2, tot2);
+      m2.FillExclusion(excl);
+    }
+
+    if (in.size() >= 1) {
+      Model257 &m1 = ctx1[hist[4]];
+      uint32_t lo1, hi1, tot1;
+      m1.CumWBEx(256, excl, lo1, hi1, tot1);
+      enc.Encode(lo1, hi1, tot1);
+      m1.FillExclusion(excl);
+    }
+
+    uint32_t lo0, hi0, tot0;
+    order0.CumWBEx(256, excl, lo0, hi0, tot0);
+    enc.Encode(lo0, hi0, tot0);
+  }
+
+  enc.Finish();
+  return out.data;
+}
+
+std::vector<uint8_t> DecompressPPM5(const std::vector<uint8_t> &in) {
+  std::unordered_map<uint64_t, Model257> ctx5;
+  std::unordered_map<uint64_t, Model257> ctx4;
+  std::unordered_map<uint32_t, Model257> ctx3;
+  std::vector<Model257> ctx2(256 * 256);
+  std::vector<Model257> ctx1(256);
+
+  for (auto &m : ctx2)
+    m.InitEscOnly();
+  for (auto &m : ctx1)
+    m.InitEscOnly();
+
+  Model257 order0;
+  order0.InitUniform256();
+
+  InBuf ib{in.data(), in.data() + in.size()};
+  RangeDec dec;
+  dec.Init(ib);
+
+  std::vector<uint8_t> out;
+  out.reserve(in.size() * 3);
+
+  uint8_t hist[5] = {0, 0, 0, 0, 0};
+  size_t i = 0;
+
+  while (true) {
+    int sym = 256;
+    bool decoded = false;
+    std::bitset<256> excl;
+
+    // Order-5
+    if (i >= 5) {
+      uint64_t idx5 = HashContext(hist, 5);
+      auto it5 = ctx5.find(idx5);
+      if (it5 != ctx5.end()) {
+        uint32_t tot5 = it5->second.GetWBTotal();
+        uint32_t f = dec.GetFreq(tot5);
+        sym = it5->second.FindByFreqWB(f, tot5);
+        uint32_t lo, hi, tot;
+        it5->second.CumWB(sym, lo, hi, tot);
+        dec.Decode(lo, hi, tot);
+        if (sym != 256)
+          decoded = true;
+        else
+          it5->second.FillExclusion(excl);
+      }
+    }
+
+    // Order-4
+    if (!decoded && i >= 4) {
+      uint64_t idx4 = HashContext(hist + 1, 4);
+      auto it4 = ctx4.find(idx4);
+      if (it4 != ctx4.end()) {
+        uint32_t tot4 = it4->second.GetWBTotalEx(excl);
+        uint32_t f = dec.GetFreq(tot4);
+        sym = it4->second.FindByFreqWBEx(f, excl);
+        uint32_t lo, hi, tot;
+        it4->second.CumWBEx(sym, excl, lo, hi, tot);
+        dec.Decode(lo, hi, tot);
+        if (sym != 256)
+          decoded = true;
+        else
+          it4->second.FillExclusion(excl);
+      }
+    }
+
+    // Order-3
+    if (!decoded && i >= 3) {
+      uint32_t idx3 =
+          ((uint32_t)hist[2] << 16) | ((uint32_t)hist[3] << 8) | hist[4];
+      auto it3 = ctx3.find(idx3);
+      if (it3 != ctx3.end()) {
+        uint32_t tot3 = it3->second.GetWBTotalEx(excl);
+        uint32_t f = dec.GetFreq(tot3);
+        sym = it3->second.FindByFreqWBEx(f, excl);
+        uint32_t lo, hi, tot;
+        it3->second.CumWBEx(sym, excl, lo, hi, tot);
+        dec.Decode(lo, hi, tot);
+        if (sym != 256)
+          decoded = true;
+        else
+          it3->second.FillExclusion(excl);
+      }
+    }
+
+    // Order-2
+    if (!decoded && i >= 2) {
+      uint32_t idx2 = ((uint32_t)hist[3] << 8) | hist[4];
+      Model257 &m2 = ctx2[idx2];
+      uint32_t tot2 = m2.GetWBTotalEx(excl);
+      uint32_t f = dec.GetFreq(tot2);
+      sym = m2.FindByFreqWBEx(f, excl);
+      uint32_t lo, hi, tot;
+      m2.CumWBEx(sym, excl, lo, hi, tot);
+      dec.Decode(lo, hi, tot);
+      if (sym != 256)
+        decoded = true;
+      else
+        m2.FillExclusion(excl);
+    }
+
+    // Order-1
+    if (!decoded && i >= 1) {
+      Model257 &m1 = ctx1[hist[4]];
+      uint32_t tot1 = m1.GetWBTotalEx(excl);
+      uint32_t f = dec.GetFreq(tot1);
+      sym = m1.FindByFreqWBEx(f, excl);
+      uint32_t lo, hi, tot;
+      m1.CumWBEx(sym, excl, lo, hi, tot);
+      dec.Decode(lo, hi, tot);
+      if (sym != 256)
+        decoded = true;
+      else
+        m1.FillExclusion(excl);
+    }
+
+    // Order-0
+    if (!decoded) {
+      uint32_t tot0 = order0.GetWBTotalEx(excl);
+      uint32_t f = dec.GetFreq(tot0);
+      sym = order0.FindByFreqWBEx(f, excl);
+      uint32_t lo, hi, tot;
+      order0.CumWBEx(sym, excl, lo, hi, tot);
+      dec.Decode(lo, hi, tot);
+      if (sym == 256)
+        break;
+    }
+
+    uint8_t b = (uint8_t)sym;
+    out.push_back(b);
+
+    // Update contexts
+    if (i >= 5)
+      ctx5[HashContext(hist, 5)].Bump(b);
+    if (i >= 4)
+      ctx4[HashContext(hist + 1, 4)].Bump(b);
+    if (i >= 3)
+      ctx3[((uint32_t)hist[2] << 16) | ((uint32_t)hist[3] << 8) | hist[4]]
+          .Bump(b);
+    if (i >= 2)
+      ctx2[((uint32_t)hist[3] << 8) | hist[4]].Bump(b);
+    if (i >= 1)
+      ctx1[hist[4]].Bump(b);
+    order0.Bump(b);
+
+    // Shift history
+    for (int j = 0; j < 4; j++)
+      hist[j] = hist[j + 1];
+    hist[4] = b;
+    i++;
+  }
+
+  return out;
+}
+
+// PPM3: Order-3 with sparse hash map for 3-byte contexts
+std::vector<uint8_t> CompressPPM3(const std::vector<uint8_t> &in) {
+  std::unordered_map<uint32_t, Model257> ctx3; // Sparse order-3
+  std::vector<Model257> ctx2(256 * 256);
+  std::vector<Model257> ctx1(256);
+
+  for (auto &m : ctx2)
+    m.InitEscOnly();
+  for (auto &m : ctx1)
+    m.InitEscOnly();
+
+  Model257 order0;
+  order0.InitUniform256();
+
+  OutBuf out;
+  RangeEnc enc;
+  enc.Init(out);
+
+  uint8_t prev1 = 0;
+  uint8_t prev2 = 0;
+  uint8_t prev3 = 0;
+
+  for (uint8_t b : in) {
+    bool encoded = false;
+    std::bitset<256> excl;
+
+    // Order-3 context (sparse)
+    uint32_t idx3 = ((uint32_t)prev3 << 16) | ((uint32_t)prev2 << 8) | prev1;
+    auto it3 = ctx3.find(idx3);
+
+    if (it3 != ctx3.end() && it3->second.Get(b) != 0) {
+      uint32_t lo, hi, tot;
+      it3->second.CumWB(b, lo, hi, tot);
+      enc.Encode(lo, hi, tot);
+      encoded = true;
+    } else if (it3 != ctx3.end()) {
+      uint32_t lo, hi, tot;
+      it3->second.CumWB(256, lo, hi, tot);
+      enc.Encode(lo, hi, tot);
+      it3->second.FillExclusion(excl);
+    }
+
+    // Order-2 context
+    if (!encoded) {
+      uint32_t idx2 = ((uint32_t)prev2 << 8) | prev1;
+      Model257 &m2 = ctx2[idx2];
+      if (m2.Get(b) != 0 && !excl[b]) {
+        uint32_t lo, hi, tot;
+        m2.CumWBEx(b, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        encoded = true;
+      } else {
+        uint32_t lo, hi, tot;
+        m2.CumWBEx(256, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        m2.FillExclusion(excl);
+      }
+    }
+
+    // Order-1 context
+    if (!encoded) {
+      Model257 &m1 = ctx1[prev1];
+      if (m1.Get(b) != 0 && !excl[b]) {
+        uint32_t lo, hi, tot;
+        m1.CumWBEx(b, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        encoded = true;
+      } else {
+        uint32_t lo, hi, tot;
+        m1.CumWBEx(256, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        m1.FillExclusion(excl);
+      }
+    }
+
+    // Order-0
+    if (!encoded) {
+      uint32_t lo, hi, tot;
+      order0.CumWBEx(b, excl, lo, hi, tot);
+      enc.Encode(lo, hi, tot);
+    }
+
+    // Update all contexts
+    ctx3[idx3].Bump(b);
+    ctx2[((uint32_t)prev2 << 8) | prev1].Bump(b);
+    ctx1[prev1].Bump(b);
+    order0.Bump(b);
+
+    prev3 = prev2;
+    prev2 = prev1;
+    prev1 = b;
+  }
+
+  // EOF
+  {
+    std::bitset<256> excl;
+    uint32_t idx3 = ((uint32_t)prev3 << 16) | ((uint32_t)prev2 << 8) | prev1;
+    auto it3 = ctx3.find(idx3);
+    if (it3 != ctx3.end()) {
+      uint32_t lo, hi, tot;
+      it3->second.CumWB(256, lo, hi, tot);
+      enc.Encode(lo, hi, tot);
+      it3->second.FillExclusion(excl);
+    }
+
+    uint32_t idx2 = ((uint32_t)prev2 << 8) | prev1;
+    Model257 &m2 = ctx2[idx2];
+    uint32_t lo2, hi2, tot2;
+    m2.CumWBEx(256, excl, lo2, hi2, tot2);
+    enc.Encode(lo2, hi2, tot2);
+    m2.FillExclusion(excl);
+
+    Model257 &m1 = ctx1[prev1];
+    uint32_t lo1, hi1, tot1;
+    m1.CumWBEx(256, excl, lo1, hi1, tot1);
+    enc.Encode(lo1, hi1, tot1);
+    m1.FillExclusion(excl);
+
+    uint32_t lo0, hi0, tot0;
+    order0.CumWBEx(256, excl, lo0, hi0, tot0);
+    enc.Encode(lo0, hi0, tot0);
+  }
+
+  enc.Finish();
+  return out.data;
+}
+
+std::vector<uint8_t> DecompressPPM3(const std::vector<uint8_t> &in) {
+  std::unordered_map<uint32_t, Model257> ctx3;
+  std::vector<Model257> ctx2(256 * 256);
+  std::vector<Model257> ctx1(256);
+
+  for (auto &m : ctx2)
+    m.InitEscOnly();
+  for (auto &m : ctx1)
+    m.InitEscOnly();
+
+  Model257 order0;
+  order0.InitUniform256();
+
+  InBuf ib{in.data(), in.data() + in.size()};
+  RangeDec dec;
+  dec.Init(ib);
+
+  std::vector<uint8_t> out;
+  out.reserve(in.size() * 3);
+
+  uint8_t prev1 = 0;
+  uint8_t prev2 = 0;
+  uint8_t prev3 = 0;
+
+  while (true) {
+    int sym = 256;
+    bool decoded = false;
+    std::bitset<256> excl;
+
+    // Order-3
+    uint32_t idx3 = ((uint32_t)prev3 << 16) | ((uint32_t)prev2 << 8) | prev1;
+    auto it3 = ctx3.find(idx3);
+    if (it3 != ctx3.end()) {
+      uint32_t tot3 = it3->second.GetWBTotal();
+      uint32_t f = dec.GetFreq(tot3);
+      sym = it3->second.FindByFreqWB(f, tot3);
+      uint32_t lo, hi, tot;
+      it3->second.CumWB(sym, lo, hi, tot);
+      dec.Decode(lo, hi, tot);
+
+      if (sym != 256) {
+        decoded = true;
+      } else {
+        it3->second.FillExclusion(excl);
+      }
+    }
+
+    // Order-2
+    if (!decoded) {
+      uint32_t idx2 = ((uint32_t)prev2 << 8) | prev1;
+      Model257 &m2 = ctx2[idx2];
+      uint32_t tot2 = m2.GetWBTotalEx(excl);
+      uint32_t f = dec.GetFreq(tot2);
+      sym = m2.FindByFreqWBEx(f, excl);
+      uint32_t lo, hi, tot;
+      m2.CumWBEx(sym, excl, lo, hi, tot);
+      dec.Decode(lo, hi, tot);
+
+      if (sym != 256) {
+        decoded = true;
+      } else {
+        m2.FillExclusion(excl);
+      }
+    }
+
+    // Order-1
+    if (!decoded) {
+      Model257 &m1 = ctx1[prev1];
+      uint32_t tot1 = m1.GetWBTotalEx(excl);
+      uint32_t f = dec.GetFreq(tot1);
+      sym = m1.FindByFreqWBEx(f, excl);
+      uint32_t lo, hi, tot;
+      m1.CumWBEx(sym, excl, lo, hi, tot);
+      dec.Decode(lo, hi, tot);
+
+      if (sym != 256) {
+        decoded = true;
+      } else {
+        m1.FillExclusion(excl);
+      }
+    }
+
+    // Order-0
+    if (!decoded) {
+      uint32_t tot0 = order0.GetWBTotalEx(excl);
+      uint32_t f = dec.GetFreq(tot0);
+      sym = order0.FindByFreqWBEx(f, excl);
+      uint32_t lo, hi, tot;
+      order0.CumWBEx(sym, excl, lo, hi, tot);
+      dec.Decode(lo, hi, tot);
+
+      if (sym == 256)
+        break;
+    }
+
+    uint8_t b = (uint8_t)sym;
+    out.push_back(b);
+
+    ctx3[idx3].Bump(b);
+    ctx2[((uint32_t)prev2 << 8) | prev1].Bump(b);
+    ctx1[prev1].Bump(b);
+    order0.Bump(b);
+
+    prev3 = prev2;
+    prev2 = prev1;
+    prev1 = b;
+  }
+
+  return out;
+}
+
+struct ModelEx {
+  std::array<uint16_t, 257> cnt{};
+  uint32_t total = 0;
+
+  void InitEscOnly() {
+    cnt.fill(0);
+    cnt[256] = 1;
+    total = 1;
+  }
+
+  uint16_t Get(int sym) const { return cnt[sym]; }
+
+  void Bump(int sym) {
+    cnt[sym] += 1;
+    total += 1;
+    // Rescale at 14 bits for better range coder precision
+    if (total >= 1u << 14) {
+      uint32_t t = 0;
+      for (int i = 0; i < 257; ++i) {
+        uint16_t v = cnt[i];
+        v = (uint16_t)((v + 1) >> 1);
+        if (v == 0 && i == 256)
+          v = 1;
+        cnt[i] = v;
+        t += v;
+      }
+      total = t;
+      if (total == 0) {
+        cnt[256] = 1;
+        total = 1;
+      }
+    }
+  }
+
+  void CumEx(int sym, const std::bitset<256> &excl, uint32_t &lo,
+             uint32_t &hi, uint32_t &tot) const {
+    uint32_t c = 0;
+    uint32_t t = 0;
+    for (int i = 0; i < 257; ++i) {
+      if (i < 256 && excl[i])
+        continue;
+      if (i == sym)
+        lo = c;
+      c += cnt[i];
+      if (i == sym)
+        hi = c;
+      t += cnt[i];
+    }
+    tot = t;
+  }
+
+  int FindByFreqEx(uint32_t f, const std::bitset<256> &excl) const {
+    uint32_t c = 0;
+    for (int i = 0; i < 257; ++i) {
+      if (i < 256 && excl[i])
+        continue;
+      uint32_t n = c + cnt[i];
+      if (f < n)
+        return i;
+      c = n;
+    }
+    return 256;
+  }
+};
+
+std::vector<uint8_t> CompressPPM4(const std::vector<uint8_t> &in) {
+  std::unordered_map<uint32_t, ModelEx> ctx4;
+  std::unordered_map<uint32_t, ModelEx> ctx3;
+  std::unordered_map<uint16_t, ModelEx> ctx2;
+  std::array<ModelEx, 256> ctx1{};
+
+  for (auto &m : ctx1)
+    m.InitEscOnly();
+
+  Model257 order0;
+  order0.InitUniform256();
+
+  OutBuf out;
+  RangeEnc enc;
+  enc.Init(out);
+
+  uint32_t h = 0;
+
+  for (uint8_t b : in) {
+    std::bitset<256> excl;
+    bool encoded = false;
+
+    auto it4 = ctx4.find(h);
+    if (it4 != ctx4.end() && it4->second.Get(b) != 0) {
+      uint32_t lo, hi, tot;
+      it4->second.CumEx(b, excl, lo, hi, tot);
+      enc.Encode(lo, hi, tot);
+      encoded = true;
+    } else if (it4 != ctx4.end()) {
+      for (int i = 0; i < 256; ++i)
+        if (it4->second.Get(i) != 0)
+          excl[i] = true;
+      uint32_t lo, hi, tot;
+      it4->second.CumEx(256, excl, lo, hi, tot);
+      enc.Encode(lo, hi, tot);
+    }
+
+    if (!encoded) {
+      uint32_t h3 = h & 0xFFFFFF;
+      auto it3 = ctx3.find(h3);
+      if (it3 != ctx3.end() && it3->second.Get(b) != 0 && !excl[b]) {
+        uint32_t lo, hi, tot;
+        it3->second.CumEx(b, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        encoded = true;
+      } else if (it3 != ctx3.end()) {
+        for (int i = 0; i < 256; ++i)
+          if (it3->second.Get(i) != 0)
+            excl[i] = true;
+        uint32_t lo, hi, tot;
+        it3->second.CumEx(256, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+      }
+    }
+
+    if (!encoded) {
+      uint16_t h2 = h & 0xFFFF;
+      auto it2 = ctx2.find(h2);
+      if (it2 != ctx2.end() && it2->second.Get(b) != 0 && !excl[b]) {
+        uint32_t lo, hi, tot;
+        it2->second.CumEx(b, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        encoded = true;
+      } else if (it2 != ctx2.end()) {
+        for (int i = 0; i < 256; ++i)
+          if (it2->second.Get(i) != 0)
+            excl[i] = true;
+        uint32_t lo, hi, tot;
+        it2->second.CumEx(256, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+      }
+    }
+
+    if (!encoded) {
+      ModelEx &m1 = ctx1[h & 0xFF];
+      if (m1.Get(b) != 0 && !excl[b]) {
+        uint32_t lo, hi, tot;
+        m1.CumEx(b, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+        encoded = true;
+      } else {
+        for (int i = 0; i < 256; ++i)
+          if (m1.Get(i) != 0)
+            excl[i] = true;
+        uint32_t lo, hi, tot;
+        m1.CumEx(256, excl, lo, hi, tot);
+        enc.Encode(lo, hi, tot);
+      }
+    }
+
+    if (!encoded) {
+      uint32_t lo, hi;
+      order0.Cum(b, lo, hi);
+      enc.Encode(lo, hi, order0.total);
+    }
+
+    ctx4[h].Bump(b);
+    ctx3[h & 0xFFFFFF].Bump(b);
+    ctx2[h & 0xFFFF].Bump(b);
+    ctx1[h & 0xFF].Bump(b);
+    order0.Bump(b);
+
+    h = (h << 8) | b;
+  }
+
+  {
+    std::bitset<256> excl;
+    auto it4 = ctx4.find(h);
+    if (it4 != ctx4.end()) {
+      for (int i = 0; i < 256; ++i)
+        if (it4->second.Get(i) != 0)
+          excl[i] = true;
+      uint32_t lo, hi, tot;
+      it4->second.CumEx(256, excl, lo, hi, tot);
+      enc.Encode(lo, hi, tot);
+    }
+
+    uint32_t h3 = h & 0xFFFFFF;
+    auto it3 = ctx3.find(h3);
+    if (it3 != ctx3.end()) {
+      for (int i = 0; i < 256; ++i)
+        if (it3->second.Get(i) != 0)
+          excl[i] = true;
+      uint32_t lo, hi, tot;
+      it3->second.CumEx(256, excl, lo, hi, tot);
+      enc.Encode(lo, hi, tot);
+    }
+
+    uint16_t h2 = h & 0xFFFF;
+    auto it2 = ctx2.find(h2);
+    if (it2 != ctx2.end()) {
+      for (int i = 0; i < 256; ++i)
+        if (it2->second.Get(i) != 0)
+          excl[i] = true;
+      uint32_t lo, hi, tot;
+      it2->second.CumEx(256, excl, lo, hi, tot);
+      enc.Encode(lo, hi, tot);
+    }
+
+    ModelEx &m1 = ctx1[h & 0xFF];
+    for (int i = 0; i < 256; ++i)
+      if (m1.Get(i) != 0)
+        excl[i] = true;
+    uint32_t lo, hi, tot;
+    m1.CumEx(256, excl, lo, hi, tot);
+    enc.Encode(lo, hi, tot);
+
+    uint32_t lo0, hi0;
+    order0.Cum(256, lo0, hi0);
+    enc.Encode(lo0, hi0, order0.total);
+  }
+
+  enc.Finish();
+  return out.data;
+}
+
+std::vector<uint8_t> DecompressPPM4(const std::vector<uint8_t> &in) {
+  std::unordered_map<uint32_t, ModelEx> ctx4;
+  std::unordered_map<uint32_t, ModelEx> ctx3;
+  std::unordered_map<uint16_t, ModelEx> ctx2;
+  std::array<ModelEx, 256> ctx1{};
+
+  for (auto &m : ctx1)
+    m.InitEscOnly();
+
+  Model257 order0;
+  order0.InitUniform256();
+
+  InBuf ib{in.data(), in.data() + in.size()};
+  RangeDec dec;
+  dec.Init(ib);
+
+  std::vector<uint8_t> out;
+  out.reserve(in.size() * 3);
+
+  uint32_t h = 0;
+
+  while (true) {
+    std::bitset<256> excl;
+    int sym = 256;
+    bool decoded = false;
+
+    auto it4 = ctx4.find(h);
+    if (it4 != ctx4.end()) {
+      uint32_t tot = 0;
+      for (int i = 0; i < 257; ++i) {
+        if (i < 256 && excl[i])
+          continue;
+        tot += it4->second.cnt[i];
+      }
+      uint32_t f = dec.GetFreq(tot);
+      sym = it4->second.FindByFreqEx(f, excl);
+      uint32_t lo, hi, t;
+      it4->second.CumEx(sym, excl, lo, hi, t);
+      dec.Decode(lo, hi, t);
+
+      if (sym != 256) {
+        decoded = true;
+      } else {
+        for (int i = 0; i < 256; ++i)
+          if (it4->second.Get(i) != 0)
+            excl[i] = true;
+      }
+    }
+
+    if (!decoded) {
+      uint32_t h3 = h & 0xFFFFFF;
+      auto it3 = ctx3.find(h3);
+      if (it3 != ctx3.end()) {
+        uint32_t tot = 0;
+        for (int i = 0; i < 257; ++i) {
+          if (i < 256 && excl[i])
+            continue;
+          tot += it3->second.cnt[i];
+        }
+        uint32_t f = dec.GetFreq(tot);
+        sym = it3->second.FindByFreqEx(f, excl);
+        uint32_t lo, hi, t;
+        it3->second.CumEx(sym, excl, lo, hi, t);
+        dec.Decode(lo, hi, t);
+
+        if (sym != 256) {
+          decoded = true;
+        } else {
+          for (int i = 0; i < 256; ++i)
+            if (it3->second.Get(i) != 0)
+              excl[i] = true;
+        }
+      }
+    }
+
+    if (!decoded) {
+      uint16_t h2 = h & 0xFFFF;
+      auto it2 = ctx2.find(h2);
+      if (it2 != ctx2.end()) {
+        uint32_t tot = 0;
+        for (int i = 0; i < 257; ++i) {
+          if (i < 256 && excl[i])
+            continue;
+          tot += it2->second.cnt[i];
+        }
+        uint32_t f = dec.GetFreq(tot);
+        sym = it2->second.FindByFreqEx(f, excl);
+        uint32_t lo, hi, t;
+        it2->second.CumEx(sym, excl, lo, hi, t);
+        dec.Decode(lo, hi, t);
+
+        if (sym != 256) {
+          decoded = true;
+        } else {
+          for (int i = 0; i < 256; ++i)
+            if (it2->second.Get(i) != 0)
+              excl[i] = true;
+        }
+      }
+    }
+
+    if (!decoded) {
+      ModelEx &m1 = ctx1[h & 0xFF];
+      uint32_t tot = 0;
+      for (int i = 0; i < 257; ++i) {
+        if (i < 256 && excl[i])
+          continue;
+        tot += m1.cnt[i];
+      }
+      uint32_t f = dec.GetFreq(tot);
+      sym = m1.FindByFreqEx(f, excl);
+      uint32_t lo, hi, t;
+      m1.CumEx(sym, excl, lo, hi, t);
+      dec.Decode(lo, hi, t);
+
+      if (sym != 256) {
+        decoded = true;
+      } else {
+        for (int i = 0; i < 256; ++i)
+          if (m1.Get(i) != 0)
+            excl[i] = true;
+      }
+    }
+
+    if (!decoded) {
+      uint32_t f = dec.GetFreq(order0.total);
+      sym = order0.FindByFreq(f);
+      uint32_t lo, hi;
+      order0.Cum(sym, lo, hi);
+      dec.Decode(lo, hi, order0.total);
+
+      if (sym == 256)
+        break;
+    }
+
+    uint8_t b = (uint8_t)sym;
+    out.push_back(b);
+
+    ctx4[h].Bump(b);
+    ctx3[h & 0xFFFFFF].Bump(b);
+    ctx2[h & 0xFFFF].Bump(b);
+    ctx1[h & 0xFF].Bump(b);
+    order0.Bump(b);
+
+    h = (h << 8) | b;
+  }
+
+  return out;
+}
+#include "rle.hpp"
+#include <stdexcept>
+
+std::vector<uint8_t> CompressRLE(const std::vector<uint8_t> &in) {
+  std::vector<uint8_t> out;
+  out.reserve(in.size());
+  size_t i = 0;
+  while (i < in.size()) {
+    uint8_t v = in[i];
+    size_t j = i + 1;
+    while (j < in.size() && in[j] == v && (j - i) < 255)
+      ++j;
+    uint8_t run = (uint8_t)(j - i);
+    out.push_back(run);
+    out.push_back(v);
+    i = j;
+  }
+  return out;
+}
+
+std::vector<uint8_t> DecompressRLE(const std::vector<uint8_t> &in) {
+  if (in.size() % 2 != 0)
+    throw std::runtime_error("bad rle");
+  std::vector<uint8_t> out;
+  for (size_t i = 0; i < in.size(); i += 2) {
+    uint8_t run = in[i];
+    uint8_t v = in[i + 1];
+    out.insert(out.end(), run, v);
+  }
+  return out;
+}
+#include "benchmark.hpp"
+#include "../io/file_io.hpp"
+#include "../models/lz77.hpp"
+#include "../models/ppm.hpp"
+#include "../models/rle.hpp"
+#include <chrono>
+#include <cstdio>
+
+static uint64_t NowNs() {
+  return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::high_resolution_clock::now().time_since_epoch())
+      .count();
+}
+
+static void PrintBench(const char *name, size_t in_sz, size_t out_sz,
+                       double sec_c, double sec_d) {
+  double ratio = in_sz ? (100.0 * (double)out_sz / (double)in_sz) : 0.0;
+  std::printf("%-10s  out=%10zu  ratio=%7.2f%%  c=%8.4fs  d=%8.4fs\n", name,
+              out_sz, ratio, sec_c, sec_d);
+}
+
+int Bench(const std::string &path) {
+  auto input = ReadAll(path);
+
+  {
+    uint64_t t0 = NowNs();
+    auto out = input;
+    uint64_t t1 = NowNs();
+    uint64_t t2 = NowNs();
+    auto back = out;
+    uint64_t t3 = NowNs();
+    if (back != input)
+      return 2;
+    PrintBench("copy", input.size(), out.size(), (t1 - t0) / 1e9,
+               (t3 - t2) / 1e9);
+  }
+
+  {
+    uint64_t t0 = NowNs();
+    auto out = CompressRLE(input);
+    uint64_t t1 = NowNs();
+    uint64_t t2 = NowNs();
+    auto back = DecompressRLE(out);
+    uint64_t t3 = NowNs();
+    if (back != input)
+      return 2;
+    PrintBench("rle", input.size(), out.size(), (t1 - t0) / 1e9,
+               (t3 - t2) / 1e9);
+  }
+
+  {
+    uint64_t t0 = NowNs();
+    auto out = CompressPPM1(input);
+    uint64_t t1 = NowNs();
+    uint64_t t2 = NowNs();
+    auto back = DecompressPPM1(out);
+    uint64_t t3 = NowNs();
+    if (back != input)
+      return 2;
+    PrintBench("ppm1", input.size(), out.size(), (t1 - t0) / 1e9,
+               (t3 - t2) / 1e9);
+  }
+
+  {
+    uint64_t t0 = NowNs();
+    auto out = CompressPPM2(input);
+    uint64_t t1 = NowNs();
+    uint64_t t2 = NowNs();
+    auto back = DecompressPPM2(out);
+    uint64_t t3 = NowNs();
+    if (back != input)
+      return 2;
+    PrintBench("ppm2", input.size(), out.size(), (t1 - t0) / 1e9,
+               (t3 - t2) / 1e9);
+  }
+
+  {
+    uint64_t t0 = NowNs();
+    auto out = CompressPPM3(input);
+    uint64_t t1 = NowNs();
+    uint64_t t2 = NowNs();
+    auto back = DecompressPPM3(out);
+    uint64_t t3 = NowNs();
+    if (back != input)
+      return 2;
+    PrintBench("ppm3", input.size(), out.size(), (t1 - t0) / 1e9,
+               (t3 - t2) / 1e9);
+  }
+
+  {
+    uint64_t t0 = NowNs();
+    auto out = CompressPPM5(input);
+    uint64_t t1 = NowNs();
+    uint64_t t2 = NowNs();
+    auto back = DecompressPPM5(out);
+    uint64_t t3 = NowNs();
+    if (back != input)
+      return 2;
+    PrintBench("ppm5", input.size(), out.size(), (t1 - t0) / 1e9,
+               (t3 - t2) / 1e9);
+  }
+
+  return 0;
+}
+#include "range_coder.hpp"
+
+void RangeEnc::Init(OutBuf &o) {
+  out = &o;
+  low = 0;
+  high = 0xFFFFFFFFu;
+}
+
+void RangeEnc::Encode(uint32_t cum_low, uint32_t cum_high, uint32_t total) {
+  uint64_t range = (uint64_t)high - low + 1;
+  high = low + (uint32_t)((range * cum_high) / total - 1);
+  low = low + (uint32_t)((range * cum_low) / total);
+
+  while ((low ^ high) < (1u << 24)) {
+    out->Put((uint8_t)(high >> 24));
+    low <<= 8;
+    high = (high << 8) | 0xFFu;
+  }
+}
+
+void RangeEnc::Finish() {
+  for (int i = 0; i < 4; ++i) {
+    out->Put((uint8_t)(low >> 24));
+    low <<= 8;
+  }
+}
+
+void RangeDec::Init(InBuf &ib) {
+  in = &ib;
+  low = 0;
+  high = 0xFFFFFFFFu;
+  code = 0;
+  for (int i = 0; i < 4; ++i) {
+    code = (code << 8) | in->Get();
+  }
+}
+
+uint32_t RangeDec::GetFreq(uint32_t total) {
+  uint64_t range = (uint64_t)high - low + 1;
+  uint64_t off = (uint64_t)code - low;
+  return (uint32_t)(((off + 1) * total - 1) / range);
+}
+
+void RangeDec::Decode(uint32_t cum_low, uint32_t cum_high, uint32_t total) {
+  uint64_t range = (uint64_t)high - low + 1;
+  high = low + (uint32_t)((range * cum_high) / total - 1);
+  low = low + (uint32_t)((range * cum_low) / total);
+
+  while ((low ^ high) < (1u << 24)) {
+    low <<= 8;
+    high = (high << 8) | 0xFFu;
+    code = (code << 8) | in->Get();
+  }
+}
