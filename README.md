@@ -152,7 +152,13 @@ ELF Binary                     0.4%     0.9%    2.0x better
 
 ## Installation
 
-### macOS / Linux
+### Homebrew (macOS/Linux)
+
+```bash
+brew install khaledalam/kcomp/kcomp
+```
+
+### From Source
 
 ```bash
 git clone https://github.com/khaledalam/kcomp
@@ -170,6 +176,10 @@ kcomp d file.kc file.txt    # Decompress
 To uninstall:
 
 ```bash
+# If installed via Homebrew
+brew uninstall kcomp
+
+# If installed from source
 make uninstall
 ```
 
