@@ -8,7 +8,7 @@
 #include <chrono>
 
 #ifndef KCOMP_VERSION
-#define KCOMP_VERSION "1.0.1"
+#define KCOMP_VERSION "1.0.2"
 #endif
 
 // File format magic bytes
